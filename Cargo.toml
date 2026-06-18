@@ -2,7 +2,12 @@
 name = "hal-mik32"
 version = "0.1.0"
 authors = ["Alex Newlifer"]
+description = "Rust hardware abstraction layer for MIK32 microcontrollers."
 license = "CC0-1.0"
+repository = "https://github.com/Newlifer/hal-mik32"
+readme = "README.md"
+keywords = ["mik32", "hal", "embedded", "no-std", "riscv"]
+categories = ["embedded", "hardware-support", "no-std"]
 rust-version = "1.87.0"
 edition = "2024"
 
