@@ -21,20 +21,25 @@ Repository: https://github.com/Newlifer/mik32-pac
 The library will reach `1.0.0` once the core peripheral set required for stable embedded development is implemented and tested.
 The release path is based on incremental HAL support for MIK32 peripherals, with the initial stable API covering the most important device functions.
 
-### Current supported peripherals
+### Required first steps
+
+These steps must be implemented in this order because they are needed for the minimal bring-up.
+
+- [ ] RCC config
+- [ ] GPIO
+- [ ] USART
+
+### Remaining roadmap
+
+After RCC, GPIO, and USART are in place, the order is not important. Each completed item increments the crate version by `0.1`.
 
 - [ ] EPIC
-- [ ] GPIO
 - [ ] Timer32 0
 - [ ] Timer32 1+2
 - [ ] Timer16 (both)
 - [ ] DMA
-- [ ] USART
 - [ ] SPI
 - [ ] SPIFI
-
-### Planned support after initial release
-
 - [ ] I2C
 - [ ] WDT
 - [ ] EEPROM
