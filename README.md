@@ -1,5 +1,7 @@
 # hal-mik32
 
+[![stability-experimental](https://img.shields.io/badge/stability-experimental-orange.svg)](https://github.com/emersion/stability-badges#experimental)
+
 `hal-mik32` is a Rust hardware abstraction library for the MIK32 microcontroller family.
 It provides safe high-level access to MCU peripherals built on top of the `mik32-pac` peripheral access crate.
 
