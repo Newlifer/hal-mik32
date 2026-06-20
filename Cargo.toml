@@ -23,4 +23,3 @@ riscv = { version = "0.16.1" }
 fugit = "0.3.9"
 embedded-timers = "0.3.0"
 critical-section = { version = "1.2.0", features = ["restore-state-bool"] }
-# riscv-rt = "0.18.0"
