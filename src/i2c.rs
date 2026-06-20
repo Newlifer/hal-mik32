@@ -260,7 +260,7 @@ impl<I2C: Instance> I2c<I2C> {
             let is_last_chunk = chunks.peek().is_none();
 
             if is_last_chunk {
-                self.wait_for_last_chunk_slot(regs)?;
+                self.wait_busy(regs)?;
             }
 
             Self::configure_transfer_size(regs, chunk.len());
