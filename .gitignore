@@ -1,6 +1,7 @@
-target/
+/target/
 .gdb_history
-Cargo.lock
+/Cargo.lock
 core
-build/
-tools/
+/build/
+tools/*/target/
+tools/*/Cargo.lock
