@@ -7,14 +7,48 @@ use mik32_pac::{I2c0, I2c1, Peripherals};
 const I2C_ADDRESS_7BIT_MAX: u16 = 0x7f;
 const I2C_NBYTE_MAX: usize = 255;
 const DEFAULT_TIMEOUT: u32 = 1_000;
+const DEFAULT_TIMING: Timing = Timing {
+    prescaler: 3,
+    scl_delay: 4,
+    sda_delay: 2,
+    scl_high: 39,
+    scl_low: 39,
+};
 const DEFAULT_CONFIG: Config = Config {
     mode: Mode::Master,
     address_primary: 0,
     address_secondary: 0,
-    general_call: true,
+    general_call: false,
     sbc_mode: false,
+    timing: DEFAULT_TIMING,
     timeout: DEFAULT_TIMEOUT,
 };
+
+/// Raw values for the I2C `TIMINGR` register.
+///
+/// The default values configure approximately 100 kHz SCL when I2CCLK is
+/// 32 MHz. Applications using another peripheral clock should provide values
+/// calculated for that clock.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct Timing {
+    pub prescaler: u8,
+    pub scl_delay: u8,
+    pub sda_delay: u8,
+    pub scl_high: u8,
+    pub scl_low: u8,
+}
+
+impl Timing {
+    pub const fn default_100khz_32mhz() -> Self {
+        DEFAULT_TIMING
+    }
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        DEFAULT_TIMING
+    }
+}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Mode {
@@ -35,6 +69,7 @@ pub struct Config {
     pub address_secondary: u16,
     pub general_call: bool,
     pub sbc_mode: bool,
+    pub timing: Timing,
     pub timeout: u32,
 }
 
@@ -57,6 +92,11 @@ impl Config {
         self.timeout = timeout;
         self
     }
+
+    pub const fn timing(mut self, timing: Timing) -> Self {
+        self.timing = timing;
+        self
+    }
 }
 
 impl Default for Config {
@@ -70,7 +110,9 @@ pub enum Error {
     BusError,
     ArbitrationLoss,
     Nack,
+    Overrun,
     Timeout,
+    InvalidMode,
 }
 
 impl i2c::Error for Error {
@@ -79,7 +121,8 @@ impl i2c::Error for Error {
             Error::BusError => i2c::ErrorKind::Bus,
             Error::ArbitrationLoss => i2c::ErrorKind::ArbitrationLoss,
             Error::Nack => i2c::ErrorKind::NoAcknowledge(NoAcknowledgeSource::Unknown),
-            Error::Timeout => i2c::ErrorKind::Other,
+            Error::Overrun => i2c::ErrorKind::Overrun,
+            Error::Timeout | Error::InvalidMode => i2c::ErrorKind::Other,
         }
     }
 }
@@ -94,7 +137,14 @@ pub type I2c0Bus = I2c<I2c0>;
 pub type I2c1Bus = I2c<I2c1>;
 pub type I2CImpl = I2c0Bus;
 
-pub trait Instance {
+mod sealed {
+    pub trait Sealed {}
+
+    impl Sealed for mik32_pac::I2c0 {}
+    impl Sealed for mik32_pac::I2c1 {}
+}
+
+pub trait Instance: sealed::Sealed {
     fn ptr() -> *const RegisterBlock;
     fn enable_clock();
 }
@@ -133,7 +183,8 @@ impl<I2C: Instance> I2c<I2C> {
 
         Self::disable(regs);
         Self::configure_filters(regs);
-        Self::configure_stretching(regs, config.mode);
+        Self::configure_timing(regs, config.timing);
+        Self::configure_stretching(regs);
         Self::enable(regs);
 
         if config.mode == Mode::Slave {
@@ -160,15 +211,28 @@ impl<I2C: Instance> I2c<I2C> {
             .write(|w| unsafe { w.pe().clear_bit().anfoff().clear_bit().dnf().bits(0) });
     }
 
-    fn configure_stretching(i2c: &RegisterBlock, mode: Mode) {
-        i2c.cr1().modify(|_, w| match mode {
-            Mode::Master => w.nostretch().clear_bit(),
-            Mode::Slave => w.nostretch().set_bit(),
+    fn configure_timing(i2c: &RegisterBlock, timing: Timing) {
+        i2c.timingr().write(|w| unsafe {
+            w.presc()
+                .bits(timing.prescaler)
+                .scldel()
+                .bits(timing.scl_delay)
+                .sdadel()
+                .bits(timing.sda_delay)
+                .sclh()
+                .bits(timing.scl_high)
+                .scll()
+                .bits(timing.scl_low)
         });
+    }
+
+    fn configure_stretching(i2c: &RegisterBlock) {
+        i2c.cr1().modify(|_, w| w.nostretch().clear_bit());
     }
 
     fn configure_slave(i2c: &RegisterBlock, config: Config) {
         Self::configure_primary_address(i2c, config.address_primary);
+        Self::configure_secondary_address(i2c, config.address_secondary);
 
         if config.general_call {
             i2c.cr1().modify(|_, w| w.gcen().set_bit());
@@ -177,9 +241,9 @@ impl<I2C: Instance> I2c<I2C> {
         }
 
         if config.sbc_mode {
-            i2c.cr1().modify(|_, w| w.sbc().clear_bit());
-        } else {
             i2c.cr1().modify(|_, w| w.sbc().set_bit());
+        } else {
+            i2c.cr1().modify(|_, w| w.sbc().clear_bit());
         }
     }
 
@@ -196,6 +260,21 @@ impl<I2C: Instance> I2c<I2C> {
 
         i2c.oar1().modify(|_, w| w.oa1en().set_bit());
     }
+
+    fn configure_secondary_address(i2c: &RegisterBlock, address: u16) {
+        i2c.oar2().write(|w| w.oa2en().clear_bit());
+
+        if address != 0 && address <= I2C_ADDRESS_7BIT_MAX {
+            i2c.oar2().write(|w| unsafe {
+                w.oa2()
+                    .bits(address as u8)
+                    .oa2msk()
+                    .bits(0)
+                    .oa2en()
+                    .set_bit()
+            });
+        }
+    }
 }
 
 impl<I2C: Instance> ErrorType for I2c<I2C> {
@@ -208,24 +287,68 @@ impl<I2C: Instance> HalI2c<SevenBitAddress> for I2c<I2C> {
         address: SevenBitAddress,
         operations: &mut [Operation<'_>],
     ) -> Result<(), Self::Error> {
-        let operations_len = operations.len();
-
-        for (index, operation) in operations.iter_mut().enumerate() {
-            let is_first = index == 0;
-            let is_last = index + 1 == operations_len;
-
-            match operation {
-                Operation::Read(buffer) => {
-                    self.transaction_read(address, buffer, is_first, is_last)?;
-                }
-                Operation::Write(bytes) => {
-                    self.transaction_write(address, bytes, is_first, is_last)?;
-                }
-            }
+        if self.config.mode != Mode::Master {
+            return Err(Error::InvalidMode);
         }
 
-        Ok(())
+        let regs = regs::<I2C>();
+        Self::clear_flags(regs);
+        if let Err(error) = self.wait_bus_idle(regs) {
+            self.recover(regs);
+            return Err(error);
+        }
+
+        let result = (|| {
+            let mut previous_direction = None;
+
+            for index in 0..operations.len() {
+                let direction = match &operations[index] {
+                    Operation::Read(_) => Direction::Read,
+                    Operation::Write(_) => Direction::Write,
+                };
+                let next_direction = operations.get(index + 1).map(|operation| match operation {
+                    Operation::Read(_) => Direction::Read,
+                    Operation::Write(_) => Direction::Write,
+                });
+                let send_start = previous_direction != Some(direction);
+                let ends_direction = next_direction != Some(direction);
+                let send_stop = next_direction.is_none();
+
+                match &mut operations[index] {
+                    Operation::Read(buffer) => self.transaction_read(
+                        address,
+                        buffer,
+                        send_start,
+                        ends_direction,
+                        send_stop,
+                    )?,
+                    Operation::Write(bytes) => self.transaction_write(
+                        address,
+                        bytes,
+                        send_start,
+                        ends_direction,
+                        send_stop,
+                    )?,
+                }
+
+                previous_direction = Some(direction);
+            }
+
+            Ok(())
+        })();
+
+        if result.is_err() {
+            self.recover(regs);
+        }
+
+        result
     }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum Direction {
+    Read,
+    Write,
 }
 
 impl<I2C: Instance> I2c<I2C> {
@@ -233,13 +356,47 @@ impl<I2C: Instance> I2c<I2C> {
         &mut self,
         address: SevenBitAddress,
         buffer: &mut [u8],
-        is_first: bool,
-        is_last: bool,
+        send_start: bool,
+        ends_direction: bool,
+        send_stop: bool,
     ) -> Result<(), Error> {
-        let _ = (address, buffer, is_first, is_last);
+        let regs = regs::<I2C>();
 
-        // TODO: prepare START/repeated START, send address with read direction,
-        // receive bytes into buffer, and send STOP when this is the last operation.
+        if buffer.is_empty() {
+            return self.transaction_empty(
+                regs,
+                address,
+                Direction::Read,
+                send_start,
+                ends_direction,
+                send_stop,
+            );
+        }
+
+        let buffer_start = buffer.as_ptr();
+        let mut chunks = buffer.chunks_mut(I2C_NBYTE_MAX).peekable();
+
+        while let Some(chunk) = chunks.next() {
+            let is_first_chunk = chunk.as_ptr() == buffer_start;
+            let is_last_chunk = chunks.peek().is_none();
+            let reload = !is_last_chunk || !ends_direction;
+            let autoend = is_last_chunk && send_stop;
+
+            Self::configure_transfer_size(regs, chunk.len(), reload, autoend);
+
+            if is_first_chunk && send_start {
+                Self::configure_address(regs, address);
+                Self::start(regs, Direction::Read);
+            }
+
+            for byte in chunk {
+                self.wait_rxne(regs)?;
+                *byte = Self::read_byte(regs);
+            }
+
+            self.wait_chunk_end(regs, reload, autoend)?;
+        }
+
         Ok(())
     }
 
@@ -247,50 +404,81 @@ impl<I2C: Instance> I2c<I2C> {
         &mut self,
         address: SevenBitAddress,
         bytes: &[u8],
-        is_first: bool,
-        is_last: bool,
+        send_start: bool,
+        ends_direction: bool,
+        send_stop: bool,
     ) -> Result<(), Error> {
-        let _ = (is_first, is_last);
         let regs = regs::<I2C>();
 
-        let mut chunks = bytes.chunks(I2C_NBYTE_MAX).enumerate().peekable();
+        if bytes.is_empty() {
+            return self.transaction_empty(
+                regs,
+                address,
+                Direction::Write,
+                send_start,
+                ends_direction,
+                send_stop,
+            );
+        }
 
-        while let Some((index, chunk)) = chunks.next() {
-            let is_first_chunk = index == 0;
+        let mut chunks = bytes.chunks(I2C_NBYTE_MAX).peekable();
+
+        while let Some(chunk) = chunks.next() {
+            let is_first_chunk = chunk.as_ptr() == bytes.as_ptr();
             let is_last_chunk = chunks.peek().is_none();
+            let reload = !is_last_chunk || !ends_direction;
+            let autoend = is_last_chunk && send_stop;
 
-            if is_last_chunk {
-                self.wait_busy(regs)?;
-            }
+            Self::configure_transfer_size(regs, chunk.len(), reload, autoend);
 
-            Self::configure_transfer_size(regs, chunk.len());
-
-            if is_first_chunk {
-                Self::configure_write_address(regs, address);
-                Self::start_write(regs);
+            if is_first_chunk && send_start {
+                Self::configure_address(regs, address);
+                Self::start(regs, Direction::Write);
             }
 
             for byte in chunk {
                 self.wait_txis(regs)?;
                 Self::write_byte(regs, *byte);
             }
+
+            self.wait_chunk_end(regs, reload, autoend)?;
         }
 
         Ok(())
     }
 
-    fn configure_transfer_size(i2c: &RegisterBlock, len: usize) {
+    fn transaction_empty(
+        &self,
+        i2c: &RegisterBlock,
+        address: SevenBitAddress,
+        direction: Direction,
+        send_start: bool,
+        ends_direction: bool,
+        send_stop: bool,
+    ) -> Result<(), Error> {
+        let reload = !ends_direction;
+        Self::configure_transfer_size(i2c, 0, reload, send_stop);
+
+        if send_start {
+            Self::configure_address(i2c, address);
+            Self::start(i2c, direction);
+        }
+
+        self.wait_chunk_end(i2c, reload, send_stop)
+    }
+
+    fn configure_transfer_size(i2c: &RegisterBlock, len: usize, reload: bool, autoend: bool) {
         i2c.cr2().modify(|_, w| unsafe {
             w.nbytes()
                 .bits(len as u8)
                 .reload()
-                .clear_bit()
+                .bit(reload)
                 .autoend()
-                .set_bit()
+                .bit(autoend)
         });
     }
 
-    fn configure_write_address(i2c: &RegisterBlock, address: SevenBitAddress) {
+    fn configure_address(i2c: &RegisterBlock, address: SevenBitAddress) {
         i2c.cr2().modify(|_, w| unsafe {
             w.add10()
                 .clear_bit()
@@ -299,21 +487,90 @@ impl<I2C: Instance> I2c<I2C> {
         });
     }
 
-    fn start_write(i2c: &RegisterBlock) {
-        i2c.cr2()
-            .modify(|_, w| w.rd_wrn().clear_bit().start().set_bit());
+    fn start(i2c: &RegisterBlock, direction: Direction) {
+        i2c.cr2().modify(|_, w| {
+            let w = match direction {
+                Direction::Read => w.rd_wrn().set_bit(),
+                Direction::Write => w.rd_wrn().clear_bit(),
+            };
+            w.start().set_bit()
+        });
     }
 
     fn write_byte(i2c: &RegisterBlock, byte: u8) {
         i2c.txdr().write(|w| unsafe { w.txdata().bits(byte) });
     }
 
-    fn wait_for_last_chunk_slot(&self, i2c: &RegisterBlock) -> Result<(), Error> {
-        if i2c.isr().read().tc().bit_is_set() {
-            self.wait_busy(i2c)
+    fn read_byte(i2c: &RegisterBlock) -> u8 {
+        i2c.rxdr().read().txdata().bits()
+    }
+
+    fn wait_chunk_end(
+        &self,
+        i2c: &RegisterBlock,
+        reload: bool,
+        autoend: bool,
+    ) -> Result<(), Error> {
+        if reload {
+            self.wait_tcr(i2c)
+        } else if autoend {
+            self.wait_stop(i2c)
         } else {
             self.wait_tc(i2c)
         }
+    }
+
+    fn check_errors(i2c: &RegisterBlock) -> Result<(), Error> {
+        let isr = i2c.isr().read();
+
+        if isr.nackf().bit_is_set() {
+            i2c.icr().write(|w| w.nackcf().set_bit());
+            return Err(Error::Nack);
+        }
+        if isr.berr().bit_is_set() {
+            i2c.icr().write(|w| w.berrcf().set_bit());
+            return Err(Error::BusError);
+        }
+        if isr.arlo().bit_is_set() {
+            i2c.icr().write(|w| w.arlocf().set_bit());
+            return Err(Error::ArbitrationLoss);
+        }
+        if isr.ovr().bit_is_set() {
+            i2c.icr().write(|w| w.ovrcf().set_bit());
+            return Err(Error::Overrun);
+        }
+
+        Ok(())
+    }
+
+    fn clear_flags(i2c: &RegisterBlock) {
+        i2c.icr().write(|w| {
+            w.nackcf()
+                .set_bit()
+                .stopcf()
+                .set_bit()
+                .berrcf()
+                .set_bit()
+                .arlocf()
+                .set_bit()
+                .ovrcf()
+                .set_bit()
+        });
+    }
+
+    fn wait_until(
+        &self,
+        i2c: &RegisterBlock,
+        ready: impl Fn(&RegisterBlock) -> bool,
+    ) -> Result<(), Error> {
+        for _ in 0..self.config.timeout {
+            Self::check_errors(i2c)?;
+            if ready(i2c) {
+                return Ok(());
+            }
+        }
+
+        Err(Error::Timeout)
     }
 
     /// Waits until `TXDR` is ready for the next byte in master transmit mode.
@@ -329,27 +586,11 @@ impl<I2C: Instance> I2c<I2C> {
     /// - [`Error::Timeout`] if `TXIS` is not set before `Config::timeout`
     ///   polling attempts are exhausted.
     fn wait_txis(&self, i2c: &RegisterBlock) -> Result<(), Error> {
-        for _ in 0..self.config.timeout {
-            let isr = i2c.isr().read();
+        self.wait_until(i2c, |i2c| i2c.isr().read().txis().bit_is_set())
+    }
 
-            if isr.nackf().bit_is_set() {
-                return Err(Error::Nack);
-            }
-
-            if isr.berr().bit_is_set() {
-                return Err(Error::BusError);
-            }
-
-            if isr.arlo().bit_is_set() {
-                return Err(Error::ArbitrationLoss);
-            }
-
-            if isr.txis().bit_is_set() {
-                return Ok(());
-            }
-        }
-
-        Err(Error::Timeout)
+    fn wait_rxne(&self, i2c: &RegisterBlock) -> Result<(), Error> {
+        self.wait_until(i2c, |i2c| i2c.isr().read().rxne().bit_is_set())
     }
 
     /// Waits until the I2C bus is no longer busy.
@@ -359,7 +600,7 @@ impl<I2C: Instance> I2c<I2C> {
     ///
     /// Returns [`Error::Timeout`] if the `BUSY` flag is still set after
     /// `Config::timeout` polling attempts are exhausted.
-    fn wait_busy(&self, i2c: &RegisterBlock) -> Result<(), Error> {
+    fn wait_bus_idle(&self, i2c: &RegisterBlock) -> Result<(), Error> {
         for _ in 0..self.config.timeout {
             if i2c.isr().read().busy().bit_is_clear() {
                 return Ok(());
@@ -378,13 +619,36 @@ impl<I2C: Instance> I2c<I2C> {
     /// Returns [`Error::Timeout`] if the `TC` flag is not set before
     /// `Config::timeout` polling attempts are exhausted.
     fn wait_tc(&self, i2c: &RegisterBlock) -> Result<(), Error> {
-        for _ in 0..self.config.timeout {
-            if i2c.isr().read().tc().bit_is_set() {
-                return Ok(());
+        self.wait_until(i2c, |i2c| i2c.isr().read().tc().bit_is_set())
+    }
+
+    fn wait_tcr(&self, i2c: &RegisterBlock) -> Result<(), Error> {
+        self.wait_until(i2c, |i2c| i2c.isr().read().tcr().bit_is_set())
+    }
+
+    fn wait_stop(&self, i2c: &RegisterBlock) -> Result<(), Error> {
+        self.wait_until(i2c, |i2c| i2c.isr().read().stopf().bit_is_set())?;
+        i2c.icr().write(|w| w.stopcf().set_bit());
+        Ok(())
+    }
+
+    fn recover(&self, i2c: &RegisterBlock) {
+        if i2c.isr().read().busy().bit_is_set() {
+            i2c.cr2().modify(|_, w| w.stop().set_bit());
+
+            for _ in 0..self.config.timeout {
+                if i2c.isr().read().stopf().bit_is_set() || i2c.isr().read().busy().bit_is_clear() {
+                    break;
+                }
             }
         }
 
-        Err(Error::Timeout)
+        Self::clear_flags(i2c);
+
+        if i2c.isr().read().busy().bit_is_set() {
+            Self::disable(i2c);
+            Self::enable(i2c);
+        }
     }
 }
 
