@@ -23,6 +23,7 @@ const DEFAULT_CONFIG: Config = Config {
     address_secondary: 0,
     general_call: false,
     sbc_mode: false,
+    underflow_fill: 0xff,
     timing: DEFAULT_TIMING,
     timeout: DEFAULT_TIMEOUT,
 };
@@ -72,6 +73,8 @@ pub struct Config {
     pub address_secondary: u16,
     pub general_call: bool,
     pub sbc_mode: bool,
+    /// Byte sent when the master reads beyond the supplied slave TX buffer.
+    pub underflow_fill: u8,
     pub timing: Timing,
     pub timeout: u32,
 }
@@ -103,6 +106,11 @@ impl Config {
 
     pub const fn primary_address(mut self, address: u16) -> Self {
         self.address_primary = address;
+        self
+    }
+
+    pub const fn underflow_fill(mut self, byte: u8) -> Self {
+        self.underflow_fill = byte;
         self
     }
 
@@ -188,6 +196,7 @@ pub enum Error {
     InvalidMode,
     InvalidAddress,
     InvalidDirection,
+    SlaveTimeout(SlaveTimeout),
 }
 
 impl i2c::Error for Error {
@@ -200,7 +209,8 @@ impl i2c::Error for Error {
             Error::Timeout
             | Error::InvalidMode
             | Error::InvalidAddress
-            | Error::InvalidDirection => i2c::ErrorKind::Other,
+            | Error::InvalidDirection
+            | Error::SlaveTimeout(_) => i2c::ErrorKind::Other,
         }
     }
 }
@@ -211,6 +221,19 @@ pub enum SlaveDirection {
     Receive,
     /// The master reads and the slave transmits.
     Transmit,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct SlaveTimeout {
+    pub direction: SlaveDirection,
+    pub count: usize,
+    pub buffer_status: SlaveBufferStatus,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SlaveAcknowledge {
+    Ack,
+    Nack,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -314,6 +337,32 @@ impl<I2C: Instance> I2c<I2C> {
         self.i2c
     }
 
+    /// Selects whether the slave acknowledges the next received byte.
+    ///
+    /// This is primarily useful after [`wait_address`](Self::wait_address)
+    /// and before [`slave_receive`](Self::slave_receive). The peripheral
+    /// clears the NACK request automatically on STOP or a new address match.
+    pub fn set_slave_acknowledge(&mut self, acknowledge: SlaveAcknowledge) -> Result<(), Error> {
+        if self.config.mode != Mode::Slave {
+            return Err(Error::InvalidMode);
+        }
+
+        let regs = regs::<I2C>();
+        regs.cr2().modify(|_, w| match acknowledge {
+            SlaveAcknowledge::Ack => w.nack().clear_bit(),
+            SlaveAcknowledge::Nack => w.nack().set_bit(),
+        });
+        Ok(())
+    }
+
+    pub fn slave_ack(&mut self) -> Result<(), Error> {
+        self.set_slave_acknowledge(SlaveAcknowledge::Ack)
+    }
+
+    pub fn slave_nack(&mut self) -> Result<(), Error> {
+        self.set_slave_acknowledge(SlaveAcknowledge::Nack)
+    }
+
     /// Waits until this slave address is matched.
     ///
     /// With clock stretching enabled, SCL remains stretched until
@@ -367,8 +416,9 @@ impl<I2C: Instance> I2c<I2C> {
     }
 
     /// Transmits bytes requested by the master until NACK, STOP, or repeated
-    /// START. If the master requests more bytes than supplied, `0xff` is sent
-    /// and [`SlaveBufferStatus::Underflow`] is reported.
+    /// START. If the master requests more bytes than supplied,
+    /// [`Config::underflow_fill`] is sent and
+    /// [`SlaveBufferStatus::Underflow`] is reported.
     pub fn slave_transmit(&mut self, buffer: &[u8]) -> Result<SlaveTransfer, Error> {
         self.ensure_slave_direction(SlaveDirection::Transmit)?;
         let regs = regs::<I2C>();
@@ -409,7 +459,6 @@ impl<I2C: Instance> I2c<I2C> {
         i2c: &RegisterBlock,
         buffer: &mut [u8],
     ) -> Result<SlaveTransfer, Error> {
-        i2c.cr2().modify(|_, w| w.nack().clear_bit());
         Self::clear_slave_end_flags(i2c);
         Self::clear_address(i2c);
 
@@ -419,7 +468,15 @@ impl<I2C: Instance> I2c<I2C> {
 
         loop {
             if remaining == 0 {
-                return Err(Error::Timeout);
+                return Err(Error::SlaveTimeout(SlaveTimeout {
+                    direction: SlaveDirection::Receive,
+                    count,
+                    buffer_status: if overflow {
+                        SlaveBufferStatus::Overflow
+                    } else {
+                        SlaveBufferStatus::Complete
+                    },
+                }));
             }
             remaining -= 1;
 
@@ -484,13 +541,21 @@ impl<I2C: Instance> I2c<I2C> {
             Self::write_byte(i2c, *byte);
             count += 1;
         } else {
-            Self::write_byte(i2c, 0xff);
+            Self::write_byte(i2c, self.config.underflow_fill);
             underflow = true;
         }
 
         loop {
             if remaining == 0 {
-                return Err(Error::Timeout);
+                return Err(Error::SlaveTimeout(SlaveTimeout {
+                    direction: SlaveDirection::Transmit,
+                    count,
+                    buffer_status: if underflow {
+                        SlaveBufferStatus::Underflow
+                    } else {
+                        SlaveBufferStatus::Complete
+                    },
+                }));
             }
             remaining -= 1;
 
@@ -551,7 +616,7 @@ impl<I2C: Instance> I2c<I2C> {
                     Self::write_byte(i2c, *byte);
                     count += 1;
                 } else {
-                    Self::write_byte(i2c, 0xff);
+                    Self::write_byte(i2c, self.config.underflow_fill);
                     underflow = true;
                 }
                 remaining = self.config.timeout;
