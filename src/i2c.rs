@@ -101,6 +101,11 @@ impl Config {
         self
     }
 
+    pub const fn primary_address(mut self, address: u16) -> Self {
+        self.address_primary = address;
+        self
+    }
+
     pub const fn validate(&self) -> Result<(), ConfigError> {
         if self.timeout == 0 {
             return Err(ConfigError::ZeroTimeout);
@@ -120,8 +125,14 @@ impl Config {
                 if self.address_primary > I2C_ADDRESS_10BIT_MAX {
                     return Err(ConfigError::PrimaryAddressOutOfRange);
                 }
-                if self.address_secondary > I2C_ADDRESS_7BIT_MAX {
-                    return Err(ConfigError::SecondaryAddressOutOfRange);
+                if self.address_primary > I2C_ADDRESS_7BIT_MAX {
+                    return Err(ConfigError::SlaveTenBitAddressUnsupported);
+                }
+                if self.address_secondary != 0 {
+                    return Err(ConfigError::SecondaryAddressUnsupported);
+                }
+                if self.sbc_mode {
+                    return Err(ConfigError::SlaveSbcUnsupported);
                 }
             }
         }
@@ -143,7 +154,9 @@ pub enum ConfigError {
     TimingSclDelayOutOfRange,
     TimingSdaDelayOutOfRange,
     PrimaryAddressOutOfRange,
-    SecondaryAddressOutOfRange,
+    SlaveTenBitAddressUnsupported,
+    SecondaryAddressUnsupported,
+    SlaveSbcUnsupported,
 }
 
 pub struct InitError<I2C> {
@@ -174,6 +187,7 @@ pub enum Error {
     Timeout,
     InvalidMode,
     InvalidAddress,
+    InvalidDirection,
 }
 
 impl i2c::Error for Error {
@@ -183,9 +197,47 @@ impl i2c::Error for Error {
             Error::ArbitrationLoss => i2c::ErrorKind::ArbitrationLoss,
             Error::Nack => i2c::ErrorKind::NoAcknowledge(NoAcknowledgeSource::Unknown),
             Error::Overrun => i2c::ErrorKind::Overrun,
-            Error::Timeout | Error::InvalidMode | Error::InvalidAddress => i2c::ErrorKind::Other,
+            Error::Timeout
+            | Error::InvalidMode
+            | Error::InvalidAddress
+            | Error::InvalidDirection => i2c::ErrorKind::Other,
         }
     }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SlaveDirection {
+    /// The master writes and the slave receives.
+    Receive,
+    /// The master reads and the slave transmits.
+    Transmit,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct AddressMatch {
+    pub address: u8,
+    pub direction: SlaveDirection,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SlaveTransferEnd {
+    Stop,
+    Nack,
+    RepeatedStart,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SlaveBufferStatus {
+    Complete,
+    Overflow,
+    Underflow,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct SlaveTransfer {
+    pub count: usize,
+    pub end: SlaveTransferEnd,
+    pub buffer_status: SlaveBufferStatus,
 }
 
 #[derive(Debug)]
@@ -260,6 +312,251 @@ impl<I2C: Instance> I2c<I2C> {
 
     pub fn free(self) -> I2C {
         self.i2c
+    }
+
+    /// Waits until this slave address is matched.
+    ///
+    /// With clock stretching enabled, SCL remains stretched until
+    /// [`slave_receive`](Self::slave_receive) or
+    /// [`slave_transmit`](Self::slave_transmit) clears the `ADDR` flag.
+    pub fn wait_address(&mut self) -> Result<AddressMatch, Error> {
+        if self.config.mode != Mode::Slave {
+            return Err(Error::InvalidMode);
+        }
+
+        let regs = regs::<I2C>();
+
+        for _ in 0..self.config.timeout {
+            Self::check_slave_bus_errors(regs)?;
+            let isr = regs.isr().read();
+
+            if isr.addr().bit_is_set() {
+                let direction = if isr.dir().bit_is_set() {
+                    SlaveDirection::Transmit
+                } else {
+                    SlaveDirection::Receive
+                };
+
+                return Ok(AddressMatch {
+                    address: isr.addcode().bits(),
+                    direction,
+                });
+            }
+
+            if isr.stopf().bit_is_set() || isr.nackf().bit_is_set() {
+                Self::clear_slave_end_flags(regs);
+            }
+        }
+
+        Err(Error::Timeout)
+    }
+
+    /// Receives bytes written by the master until STOP or repeated START.
+    /// If more bytes arrive than fit in `buffer`, the extra byte is discarded,
+    /// NACK is requested, and [`SlaveBufferStatus::Overflow`] is reported.
+    pub fn slave_receive(&mut self, buffer: &mut [u8]) -> Result<SlaveTransfer, Error> {
+        self.ensure_slave_direction(SlaveDirection::Receive)?;
+        let regs = regs::<I2C>();
+        let result = self.slave_receive_inner(regs, buffer);
+
+        if result.is_err() {
+            self.recover_slave(regs);
+        }
+
+        result
+    }
+
+    /// Transmits bytes requested by the master until NACK, STOP, or repeated
+    /// START. If the master requests more bytes than supplied, `0xff` is sent
+    /// and [`SlaveBufferStatus::Underflow`] is reported.
+    pub fn slave_transmit(&mut self, buffer: &[u8]) -> Result<SlaveTransfer, Error> {
+        self.ensure_slave_direction(SlaveDirection::Transmit)?;
+        let regs = regs::<I2C>();
+        let result = self.slave_transmit_inner(regs, buffer);
+
+        if result.is_err() {
+            self.recover_slave(regs);
+        }
+
+        result
+    }
+
+    fn ensure_slave_direction(&self, expected: SlaveDirection) -> Result<(), Error> {
+        if self.config.mode != Mode::Slave {
+            return Err(Error::InvalidMode);
+        }
+
+        let isr = regs::<I2C>().isr().read();
+        if isr.addr().bit_is_clear() {
+            return Err(Error::InvalidDirection);
+        }
+
+        let actual = if isr.dir().bit_is_set() {
+            SlaveDirection::Transmit
+        } else {
+            SlaveDirection::Receive
+        };
+
+        if actual != expected {
+            return Err(Error::InvalidDirection);
+        }
+
+        Ok(())
+    }
+
+    fn slave_receive_inner(
+        &self,
+        i2c: &RegisterBlock,
+        buffer: &mut [u8],
+    ) -> Result<SlaveTransfer, Error> {
+        i2c.cr2().modify(|_, w| w.nack().clear_bit());
+        Self::clear_slave_end_flags(i2c);
+        Self::clear_address(i2c);
+
+        let mut count = 0;
+        let mut overflow = false;
+        let mut remaining = self.config.timeout;
+
+        loop {
+            if remaining == 0 {
+                return Err(Error::Timeout);
+            }
+            remaining -= 1;
+
+            Self::check_slave_bus_errors(i2c)?;
+            let isr = i2c.isr().read();
+
+            if isr.rxne().bit_is_set() {
+                let byte = Self::read_byte(i2c);
+                if let Some(slot) = buffer.get_mut(count) {
+                    *slot = byte;
+                    count += 1;
+                } else {
+                    overflow = true;
+                    i2c.cr2().modify(|_, w| w.nack().set_bit());
+                }
+                remaining = self.config.timeout;
+                continue;
+            }
+
+            if isr.addr().bit_is_set() {
+                return Ok(SlaveTransfer {
+                    count,
+                    end: SlaveTransferEnd::RepeatedStart,
+                    buffer_status: if overflow {
+                        SlaveBufferStatus::Overflow
+                    } else {
+                        SlaveBufferStatus::Complete
+                    },
+                });
+            }
+
+            if isr.stopf().bit_is_set() {
+                Self::finish_slave_transfer(i2c);
+                return Ok(SlaveTransfer {
+                    count,
+                    end: SlaveTransferEnd::Stop,
+                    buffer_status: if overflow {
+                        SlaveBufferStatus::Overflow
+                    } else {
+                        SlaveBufferStatus::Complete
+                    },
+                });
+            }
+        }
+    }
+
+    fn slave_transmit_inner(
+        &self,
+        i2c: &RegisterBlock,
+        buffer: &[u8],
+    ) -> Result<SlaveTransfer, Error> {
+        Self::clear_slave_end_flags(i2c);
+        Self::flush_txdr(i2c);
+        Self::clear_address(i2c);
+
+        let mut count = 0;
+        let mut underflow = false;
+        let mut saw_nack = false;
+        let mut remaining = self.config.timeout;
+
+        if let Some(byte) = buffer.get(count) {
+            Self::write_byte(i2c, *byte);
+            count += 1;
+        } else {
+            Self::write_byte(i2c, 0xff);
+            underflow = true;
+        }
+
+        loop {
+            if remaining == 0 {
+                return Err(Error::Timeout);
+            }
+            remaining -= 1;
+
+            Self::check_slave_bus_errors(i2c)?;
+            let isr = i2c.isr().read();
+
+            if isr.nackf().bit_is_set() {
+                i2c.icr().write(|w| w.nackcf().set_bit());
+                saw_nack = true;
+                remaining = self.config.timeout;
+            }
+
+            if isr.addr().bit_is_set() {
+                Self::flush_txdr(i2c);
+                return Ok(SlaveTransfer {
+                    count,
+                    end: SlaveTransferEnd::RepeatedStart,
+                    buffer_status: if underflow {
+                        SlaveBufferStatus::Underflow
+                    } else {
+                        SlaveBufferStatus::Complete
+                    },
+                });
+            }
+
+            if isr.stopf().bit_is_set() {
+                Self::finish_slave_transfer(i2c);
+                return Ok(SlaveTransfer {
+                    count,
+                    end: if saw_nack {
+                        SlaveTransferEnd::Nack
+                    } else {
+                        SlaveTransferEnd::Stop
+                    },
+                    buffer_status: if underflow {
+                        SlaveBufferStatus::Underflow
+                    } else {
+                        SlaveBufferStatus::Complete
+                    },
+                });
+            }
+
+            if saw_nack && isr.busy().bit_is_clear() {
+                Self::finish_slave_transfer(i2c);
+                return Ok(SlaveTransfer {
+                    count,
+                    end: SlaveTransferEnd::Nack,
+                    buffer_status: if underflow {
+                        SlaveBufferStatus::Underflow
+                    } else {
+                        SlaveBufferStatus::Complete
+                    },
+                });
+            }
+
+            if !saw_nack && isr.txis().bit_is_set() {
+                if let Some(byte) = buffer.get(count) {
+                    Self::write_byte(i2c, *byte);
+                    count += 1;
+                } else {
+                    Self::write_byte(i2c, 0xff);
+                    underflow = true;
+                }
+                remaining = self.config.timeout;
+            }
+        }
     }
 
     fn disable(i2c: &RegisterBlock) {
@@ -595,6 +892,13 @@ impl<I2C: Instance> I2c<I2C> {
             i2c.icr().write(|w| w.nackcf().set_bit());
             return Err(Error::Nack);
         }
+
+        Self::check_slave_bus_errors(i2c)
+    }
+
+    fn check_slave_bus_errors(i2c: &RegisterBlock) -> Result<(), Error> {
+        let isr = i2c.isr().read();
+
         if isr.berr().bit_is_set() {
             i2c.icr().write(|w| w.berrcf().set_bit());
             return Err(Error::BusError);
@@ -609,6 +913,20 @@ impl<I2C: Instance> I2c<I2C> {
         }
 
         Ok(())
+    }
+
+    fn clear_address(i2c: &RegisterBlock) {
+        i2c.icr().write(|w| w.addrcf().set_bit());
+    }
+
+    fn clear_slave_end_flags(i2c: &RegisterBlock) {
+        i2c.icr().write(|w| w.nackcf().set_bit().stopcf().set_bit());
+    }
+
+    fn finish_slave_transfer(i2c: &RegisterBlock) {
+        Self::flush_txdr(i2c);
+        Self::clear_slave_end_flags(i2c);
+        i2c.cr2().modify(|_, w| w.nack().clear_bit());
     }
 
     fn clear_flags(i2c: &RegisterBlock) {
@@ -734,6 +1052,17 @@ impl<I2C: Instance> I2c<I2C> {
             Self::disable(i2c);
             Self::enable(i2c);
         }
+    }
+
+    fn recover_slave(&self, i2c: &RegisterBlock) {
+        Self::flush_txdr(i2c);
+        i2c.cr2().modify(|_, w| w.nack().clear_bit());
+        if i2c.isr().read().addr().bit_is_set() {
+            Self::clear_address(i2c);
+        }
+        Self::clear_flags(i2c);
+        Self::disable(i2c);
+        Self::enable(i2c);
     }
 }
 
