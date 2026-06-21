@@ -40,7 +40,7 @@ After RCC, GPIO, and USART are in place, the order is not important. Each comple
 - [ ] DMA
 - [ ] SPI
 - [ ] SPIFI
-- [ ] I2C
+- [x] I2C
 - [ ] WDT
 - [ ] EEPROM
 - [ ] AVCC
