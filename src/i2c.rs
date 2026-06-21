@@ -20,7 +20,7 @@ const DEFAULT_TIMING: Timing = Timing {
 const DEFAULT_CONFIG: Config = Config {
     mode: Mode::Master,
     address_primary: 0,
-    address_secondary: 0,
+    address_secondary: None,
     general_call: false,
     sbc_mode: false,
     underflow_fill: 0xff,
@@ -60,6 +60,31 @@ pub enum Mode {
     Slave,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u8)]
+pub enum SecondaryAddressMask {
+    Exact = 0,
+    IgnoreOneBit = 1,
+    IgnoreTwoBits = 2,
+    IgnoreThreeBits = 3,
+    IgnoreFourBits = 4,
+    IgnoreFiveBits = 5,
+    IgnoreSixBits = 6,
+    AllNonReserved = 7,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct SecondaryAddress {
+    pub address: u8,
+    pub mask: SecondaryAddressMask,
+}
+
+impl SecondaryAddress {
+    pub const fn new(address: u8, mask: SecondaryAddressMask) -> Self {
+        Self { address, mask }
+    }
+}
+
 impl Default for Mode {
     fn default() -> Self {
         Self::Master
@@ -70,7 +95,7 @@ impl Default for Mode {
 pub struct Config {
     pub mode: Mode,
     pub address_primary: u16,
-    pub address_secondary: u16,
+    pub address_secondary: Option<SecondaryAddress>,
     pub general_call: bool,
     pub sbc_mode: bool,
     /// Byte sent when the master reads beyond the supplied slave TX buffer.
@@ -109,6 +134,21 @@ impl Config {
         self
     }
 
+    pub const fn secondary_address(mut self, address: SecondaryAddress) -> Self {
+        self.address_secondary = Some(address);
+        self
+    }
+
+    pub const fn without_secondary_address(mut self) -> Self {
+        self.address_secondary = None;
+        self
+    }
+
+    pub const fn general_call(mut self, enabled: bool) -> Self {
+        self.general_call = enabled;
+        self
+    }
+
     pub const fn underflow_fill(mut self, byte: u8) -> Self {
         self.underflow_fill = byte;
         self
@@ -136,8 +176,10 @@ impl Config {
                 if self.address_primary > I2C_ADDRESS_7BIT_MAX {
                     return Err(ConfigError::SlaveTenBitAddressUnsupported);
                 }
-                if self.address_secondary != 0 {
-                    return Err(ConfigError::SecondaryAddressUnsupported);
+                if let Some(address) = self.address_secondary {
+                    if address.address as u16 > I2C_ADDRESS_7BIT_MAX {
+                        return Err(ConfigError::SecondaryAddressOutOfRange);
+                    }
                 }
                 if self.sbc_mode {
                     return Err(ConfigError::SlaveSbcUnsupported);
@@ -163,7 +205,7 @@ pub enum ConfigError {
     TimingSdaDelayOutOfRange,
     PrimaryAddressOutOfRange,
     SlaveTenBitAddressUnsupported,
-    SecondaryAddressUnsupported,
+    SecondaryAddressOutOfRange,
     SlaveSbcUnsupported,
 }
 
@@ -237,8 +279,16 @@ pub enum SlaveAcknowledge {
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum AddressMatchSource {
+    Primary,
+    Secondary,
+    GeneralCall,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct AddressMatch {
     pub address: u8,
+    pub source: AddressMatchSource,
     pub direction: SlaveDirection,
 }
 
@@ -380,6 +430,7 @@ impl<I2C: Instance> I2c<I2C> {
             let isr = regs.isr().read();
 
             if isr.addr().bit_is_set() {
+                let address = isr.addcode().bits();
                 let direction = if isr.dir().bit_is_set() {
                     SlaveDirection::Transmit
                 } else {
@@ -387,7 +438,8 @@ impl<I2C: Instance> I2c<I2C> {
                 };
 
                 return Ok(AddressMatch {
-                    address: isr.addcode().bits(),
+                    address,
+                    source: self.address_match_source(address),
                     direction,
                 });
             }
@@ -398,6 +450,19 @@ impl<I2C: Instance> I2c<I2C> {
         }
 
         Err(Error::Timeout)
+    }
+
+    fn address_match_source(&self, address: u8) -> AddressMatchSource {
+        if self.config.general_call && address == 0 {
+            AddressMatchSource::GeneralCall
+        } else if self.config.address_primary as u8 == address {
+            AddressMatchSource::Primary
+        } else {
+            // ADDR can only be raised for an enabled own address or general
+            // call. With OA1 and general call ruled out above, this is OA2,
+            // including matches accepted through OA2MSK.
+            AddressMatchSource::Secondary
+        }
     }
 
     /// Receives bytes written by the master until STOP or repeated START.
@@ -687,17 +752,23 @@ impl<I2C: Instance> I2c<I2C> {
         i2c.oar1().modify(|_, w| w.oa1en().set_bit());
     }
 
-    fn configure_secondary_address(i2c: &RegisterBlock, address: u16) {
-        i2c.oar2().write(|w| w.oa2en().clear_bit());
+    fn configure_secondary_address(i2c: &RegisterBlock, address: Option<SecondaryAddress>) {
+        i2c.oar2().write(|w| w.oa2en().nack());
 
-        if address != 0 && address <= I2C_ADDRESS_7BIT_MAX {
-            i2c.oar2().write(|w| unsafe {
-                w.oa2()
-                    .bits(address as u8)
-                    .oa2msk()
-                    .bits(0)
-                    .oa2en()
-                    .set_bit()
+        if let Some(address) = address {
+            i2c.oar2().write(|w| {
+                let w = unsafe { w.oa2().bits(address.address) };
+                let w = match address.mask {
+                    SecondaryAddressMask::Exact => w.oa2msk().no_mask(),
+                    SecondaryAddressMask::IgnoreOneBit => w.oa2msk()._1_1_masked(),
+                    SecondaryAddressMask::IgnoreTwoBits => w.oa2msk()._2_1_masked(),
+                    SecondaryAddressMask::IgnoreThreeBits => w.oa2msk()._3_1_masked(),
+                    SecondaryAddressMask::IgnoreFourBits => w.oa2msk()._4_1_masked(),
+                    SecondaryAddressMask::IgnoreFiveBits => w.oa2msk()._5_1_masked(),
+                    SecondaryAddressMask::IgnoreSixBits => w.oa2msk()._6_1_masked(),
+                    SecondaryAddressMask::AllNonReserved => w.oa2msk()._7_1_masked(),
+                };
+                w.oa2en().ack()
             });
         }
     }
