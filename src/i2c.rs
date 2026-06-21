@@ -1,3 +1,4 @@
+use core::fmt;
 use embedded_hal::i2c::{
     self, ErrorType, I2c as HalI2c, NoAcknowledgeSource, Operation, SevenBitAddress,
 };
@@ -5,7 +6,9 @@ use mik32_pac::i2c_0::RegisterBlock;
 use mik32_pac::{I2c0, I2c1, Peripherals};
 
 const I2C_ADDRESS_7BIT_MAX: u16 = 0x7f;
+const I2C_ADDRESS_10BIT_MAX: u16 = 0x03ff;
 const I2C_NBYTE_MAX: usize = 255;
+const TIMING_4BIT_MAX: u8 = 0x0f;
 const DEFAULT_TIMEOUT: u32 = 1_000;
 const DEFAULT_TIMING: Timing = Timing {
     prescaler: 3,
@@ -97,11 +100,68 @@ impl Config {
         self.timing = timing;
         self
     }
+
+    pub const fn validate(&self) -> Result<(), ConfigError> {
+        if self.timeout == 0 {
+            return Err(ConfigError::ZeroTimeout);
+        }
+        if self.timing.prescaler > TIMING_4BIT_MAX {
+            return Err(ConfigError::TimingPrescalerOutOfRange);
+        }
+        if self.timing.scl_delay > TIMING_4BIT_MAX {
+            return Err(ConfigError::TimingSclDelayOutOfRange);
+        }
+        if self.timing.sda_delay > TIMING_4BIT_MAX {
+            return Err(ConfigError::TimingSdaDelayOutOfRange);
+        }
+        match self.mode {
+            Mode::Master => {}
+            Mode::Slave => {
+                if self.address_primary > I2C_ADDRESS_10BIT_MAX {
+                    return Err(ConfigError::PrimaryAddressOutOfRange);
+                }
+                if self.address_secondary > I2C_ADDRESS_7BIT_MAX {
+                    return Err(ConfigError::SecondaryAddressOutOfRange);
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         DEFAULT_CONFIG
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum ConfigError {
+    ZeroTimeout,
+    TimingPrescalerOutOfRange,
+    TimingSclDelayOutOfRange,
+    TimingSdaDelayOutOfRange,
+    PrimaryAddressOutOfRange,
+    SecondaryAddressOutOfRange,
+}
+
+pub struct InitError<I2C> {
+    pub i2c: I2C,
+    pub error: ConfigError,
+}
+
+impl<I2C> InitError<I2C> {
+    pub fn into_parts(self) -> (I2C, ConfigError) {
+        (self.i2c, self.error)
+    }
+}
+
+impl<I2C> fmt::Debug for InitError<I2C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InitError")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 
@@ -113,6 +173,7 @@ pub enum Error {
     Overrun,
     Timeout,
     InvalidMode,
+    InvalidAddress,
 }
 
 impl i2c::Error for Error {
@@ -122,7 +183,7 @@ impl i2c::Error for Error {
             Error::ArbitrationLoss => i2c::ErrorKind::ArbitrationLoss,
             Error::Nack => i2c::ErrorKind::NoAcknowledge(NoAcknowledgeSource::Unknown),
             Error::Overrun => i2c::ErrorKind::Overrun,
-            Error::Timeout | Error::InvalidMode => i2c::ErrorKind::Other,
+            Error::Timeout | Error::InvalidMode | Error::InvalidAddress => i2c::ErrorKind::Other,
         }
     }
 }
@@ -176,7 +237,10 @@ impl Instance for I2c1 {
 }
 
 impl<I2C: Instance> I2c<I2C> {
-    pub fn new(i2c: I2C, config: Config) -> Self {
+    pub fn new(i2c: I2C, config: Config) -> Result<Self, InitError<I2C>> {
+        if let Err(error) = config.validate() {
+            return Err(InitError { i2c, error });
+        }
         I2C::enable_clock();
 
         let regs = regs::<I2C>();
@@ -191,7 +255,7 @@ impl<I2C: Instance> I2c<I2C> {
             Self::configure_slave(regs, config);
         }
 
-        Self { i2c, config }
+        Ok(Self { i2c, config })
     }
 
     pub fn free(self) -> I2C {
@@ -199,7 +263,7 @@ impl<I2C: Instance> I2c<I2C> {
     }
 
     fn disable(i2c: &RegisterBlock) {
-        i2c.cr1().write(|w| w.pe().clear_bit());
+        i2c.cr1().modify(|_, w| w.pe().clear_bit());
     }
 
     fn enable(i2c: &RegisterBlock) {
@@ -290,11 +354,15 @@ impl<I2C: Instance> HalI2c<SevenBitAddress> for I2c<I2C> {
         if self.config.mode != Mode::Master {
             return Err(Error::InvalidMode);
         }
+        if address as u16 > I2C_ADDRESS_7BIT_MAX {
+            return Err(Error::InvalidAddress);
+        }
 
         let regs = regs::<I2C>();
         Self::clear_flags(regs);
         if let Err(error) = self.wait_bus_idle(regs) {
-            self.recover(regs);
+            Self::flush_txdr(regs);
+            Self::clear_flags(regs);
             return Err(error);
         }
 
@@ -337,8 +405,8 @@ impl<I2C: Instance> HalI2c<SevenBitAddress> for I2c<I2C> {
             Ok(())
         })();
 
-        if result.is_err() {
-            self.recover(regs);
+        if let Err(error) = result {
+            self.recover(regs, error);
         }
 
         result
@@ -628,11 +696,27 @@ impl<I2C: Instance> I2c<I2C> {
 
     fn wait_stop(&self, i2c: &RegisterBlock) -> Result<(), Error> {
         self.wait_until(i2c, |i2c| i2c.isr().read().stopf().bit_is_set())?;
+        Self::flush_txdr(i2c);
         i2c.icr().write(|w| w.stopcf().set_bit());
         Ok(())
     }
 
-    fn recover(&self, i2c: &RegisterBlock) {
+    fn flush_txdr(i2c: &RegisterBlock) {
+        // TXE is software-settable to discard pending TXDR data, but the PAC
+        // does not currently expose a typed writer for this bit.
+        i2c.isr().write(|w| unsafe { w.bits(1) });
+    }
+
+    fn recover(&self, i2c: &RegisterBlock, error: Error) {
+        Self::flush_txdr(i2c);
+
+        // After losing arbitration another master owns the bus. Generating
+        // STOP or toggling PE here would interfere with its transaction.
+        if error == Error::ArbitrationLoss {
+            Self::clear_flags(i2c);
+            return;
+        }
+
         if i2c.isr().read().busy().bit_is_set() {
             i2c.cr2().modify(|_, w| w.stop().set_bit());
 
@@ -643,6 +727,7 @@ impl<I2C: Instance> I2c<I2C> {
             }
         }
 
+        Self::flush_txdr(i2c);
         Self::clear_flags(i2c);
 
         if i2c.isr().read().busy().bit_is_set() {
