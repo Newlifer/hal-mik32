@@ -19,6 +19,7 @@ pub struct Output;
 
 /// Func2Mode mode (type state)
 pub struct Func2Mode;
+pub struct Func3Mode;
 
 pub struct Pin<const P: u8, const N: u8, MODE = Floating> {
     _mode: PhantomData<MODE>,
@@ -32,6 +33,7 @@ impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
 
 pub trait OutputPermitted {}
 pub trait SerialPermitted {}
+pub trait TimerSerialPermitted {}
 pub trait InputMode {}
 
 impl InputMode for Floating {}
@@ -56,6 +58,29 @@ fn set_gpio_function<const P: u8, const N: u8>(p: &Peripherals) {
             .pad_config
             .pad2_cfg()
             .modify(|r, w| unsafe { w.bits(r.bits() & !mask) }),
+        _ => panic!("Invalid port number {}", P),
+    };
+}
+
+#[inline(always)]
+fn set_alternate_function<const P: u8, const N: u8>(p: &Peripherals, function: u32) {
+    let shift = 2 * N;
+    let mask = 0b11u32 << shift;
+    let value = function << shift;
+
+    match P {
+        0 => p
+            .pad_config
+            .pad0_cfg()
+            .modify(|r, w| unsafe { w.bits((r.bits() & !mask) | value) }),
+        1 => p
+            .pad_config
+            .pad1_cfg()
+            .modify(|r, w| unsafe { w.bits((r.bits() & !mask) | value) }),
+        2 => p
+            .pad_config
+            .pad2_cfg()
+            .modify(|r, w| unsafe { w.bits((r.bits() & !mask) | value) }),
         _ => panic!("Invalid port number {}", P),
     };
 }
@@ -165,12 +190,7 @@ impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
     {
         let p = unsafe { Peripherals::steal() };
 
-        p.pad_config.pad1_cfg().modify(|r, w| unsafe {
-            let shift = 2 * N;
-            let mask = 0b11u32 << shift;
-
-            w.bits((r.bits() & !mask) | (0b01u32 << shift))
-        });
+        set_alternate_function::<P, N>(&p, 0b01);
 
         // // FIXME gpio16_0 – нужно выбирать в зависимости от P
         // p.gpio16_0.direction_in().write(|w| unsafe { w.bits(1 << N) });
@@ -188,6 +208,15 @@ impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
         //     unsafe { w.bits(r.bits() | (1 << N)) }
         // );
 
+        Pin::new()
+    }
+
+    pub fn into_timer_serial_port(self) -> Pin<P, N, Func3Mode>
+    where
+        Pin<P, N>: TimerSerialPermitted,
+    {
+        let p = unsafe { Peripherals::steal() };
+        set_alternate_function::<P, N>(&p, 0b10);
         Pin::new()
     }
 }
@@ -331,7 +360,7 @@ pub mod port_0 {
 }
 
 pub mod port_1 {
-    use super::{OutputPermitted, Pin, SerialPermitted};
+    use super::{OutputPermitted, Pin, SerialPermitted, TimerSerialPermitted};
 
     pub type Pin00 = Pin<1, 0>;
     impl OutputPermitted for Pin<1, 0> {}
@@ -350,6 +379,7 @@ pub mod port_1 {
 
     pub type Pin05 = Pin<1, 5>;
     impl OutputPermitted for Pin<1, 5> {}
+    impl TimerSerialPermitted for Pin<1, 5> {}
 
     pub type Pin06 = Pin<1, 6>;
     impl OutputPermitted for Pin<1, 6> {}
@@ -389,7 +419,7 @@ pub mod port_1 {
 }
 
 pub mod port_2 {
-    use super::{OutputPermitted, Pin};
+    use super::{OutputPermitted, Pin, TimerSerialPermitted};
 
     pub type Pin00 = Pin<2, 0>;
     impl OutputPermitted for Pin<2, 0> {}
@@ -411,6 +441,7 @@ pub mod port_2 {
 
     pub type Pin06 = Pin<2, 6>;
     impl OutputPermitted for Pin<2, 6> {}
+    impl TimerSerialPermitted for Pin<2, 6> {}
 
     pub type Pin07 = Pin<2, 7>;
     impl OutputPermitted for Pin<2, 7> {}
