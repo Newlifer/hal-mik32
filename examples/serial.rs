@@ -26,7 +26,7 @@ pub extern "C" fn main() -> ! {
     let rx = Pin08::new().into_serial_port();
     let tx = Pin09::new().into_serial_port();
 
-    let serial = Serial::new(peripherals.usart_1, (tx, rx), Config::default());
+    let serial = Serial::new(peripherals.usart_1, (tx, rx), Config::default()).unwrap();
     let (mut tx, _rx) = serial.split();
 
     loop {

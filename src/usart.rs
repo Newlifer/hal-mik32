@@ -8,9 +8,10 @@ use embedded_hal_nb::serial::{ErrorKind, ErrorType, Read, Write};
 use mik32_pac::usart_0::RegisterBlock;
 use mik32_pac::{Peripherals, Usart0, Usart1};
 
-use crate::constants::{DIV_AHB, DIV_APB_P};
 use crate::gpio::{Func2Mode, Pin};
 use crate::rcc::system_clock;
+
+const DEFAULT_INIT_TIMEOUT: u32 = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WordLength {
@@ -61,6 +62,7 @@ pub struct Config {
     pub duplex_mode: DuplexMode,
     pub sync_mode: SyncMode,
     pub dma: DmaConfig,
+    pub init_timeout: u32,
 }
 
 impl Config {
@@ -73,6 +75,7 @@ impl Config {
             duplex_mode: DuplexMode::Full,
             sync_mode: SyncMode::Async,
             dma: DmaConfig::None,
+            init_timeout: DEFAULT_INIT_TIMEOUT,
         }
     }
 
@@ -110,6 +113,62 @@ impl Config {
         self.dma = dma;
         self
     }
+
+    pub const fn init_timeout(mut self, timeout: u32) -> Self {
+        self.init_timeout = timeout;
+        self
+    }
+
+    pub const fn validate(&self) -> Result<(), ConfigError> {
+        if self.baudrate == 0 {
+            return Err(ConfigError::ZeroBaudrate);
+        }
+        if self.init_timeout == 0 {
+            return Err(ConfigError::ZeroInitTimeout);
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigError {
+    ZeroBaudrate,
+    ZeroInitTimeout,
+    BaudrateTooHigh,
+    BaudrateTooLow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitErrorKind {
+    InvalidConfig(ConfigError),
+    PeripheralNotReady,
+}
+
+pub struct InitError<UART, TXPIN, RXPIN> {
+    pub uart: UART,
+    pub pins: (TXPIN, RXPIN),
+    pub error: InitErrorKind,
+}
+
+impl<UART, TXPIN, RXPIN> InitError<UART, TXPIN, RXPIN> {
+    pub fn into_parts(self) -> (UART, (TXPIN, RXPIN), InitErrorKind) {
+        (self.uart, self.pins, self.error)
+    }
+}
+
+impl<UART, TXPIN, RXPIN> fmt::Debug for InitError<UART, TXPIN, RXPIN> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InitError")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
 }
 
 pub trait TxPin<UART> {}
@@ -121,7 +180,14 @@ impl RxPin<Usart0> for Pin<0, 5, Func2Mode> {}
 impl TxPin<Usart1> for Pin<1, 9, Func2Mode> {}
 impl RxPin<Usart1> for Pin<1, 8, Func2Mode> {}
 
-pub trait Instance {
+mod sealed {
+    pub trait Sealed {}
+
+    impl Sealed for mik32_pac::Usart0 {}
+    impl Sealed for mik32_pac::Usart1 {}
+}
+
+pub trait Instance: sealed::Sealed {
     fn ptr() -> *const RegisterBlock;
     fn enable_clock();
 }
@@ -176,12 +242,40 @@ where
     TXPIN: TxPin<UART>,
     RXPIN: RxPin<UART>,
 {
-    pub fn new(uart: UART, pins: (TXPIN, RXPIN), config: Config) -> Self {
+    pub fn new(
+        uart: UART,
+        pins: (TXPIN, RXPIN),
+        config: Config,
+    ) -> Result<Self, InitError<UART, TXPIN, RXPIN>> {
+        if let Err(error) = config.validate() {
+            return Err(InitError {
+                uart,
+                pins,
+                error: InitErrorKind::InvalidConfig(error),
+            });
+        }
+
+        let baudrate_divisor = match calc_baudrate_divisor(config.baudrate) {
+            Ok(divisor) => divisor,
+            Err(error) => {
+                return Err(InitError {
+                    uart,
+                    pins,
+                    error: InitErrorKind::InvalidConfig(error),
+                });
+            }
+        };
+
         UART::enable_clock();
 
         let serial = Self { uart, pins };
-        serial.configure(config);
-        serial
+        if let Err(error) = serial.configure(config, baudrate_divisor) {
+            serial.regs().control1().modify(|_, w| w.ue().disable());
+            let Self { uart, pins } = serial;
+            return Err(InitError { uart, pins, error });
+        }
+
+        Ok(serial)
     }
 
     pub fn split(self) -> (Tx<UART>, Rx<UART>) {
@@ -196,9 +290,8 @@ where
         unsafe { &*UART::ptr() }
     }
 
-    fn configure(&self, config: Config) {
+    fn configure(&self, config: Config, baudrate_divisor: u16) -> Result<(), InitErrorKind> {
         let regs = self.regs();
-        let baudrate_divisor = calc_baudrate_divisor(config.baudrate);
 
         regs.control1().modify(|_, w| w.ue().disable());
 
@@ -295,12 +388,15 @@ where
         regs.control1()
             .modify(|_, w| w.te().enable().re().enable().ue().enable());
 
-        while {
+        for _ in 0..config.init_timeout {
             let flags = regs.flags().read();
-            flags.teack().bit_is_clear() || flags.reack().bit_is_clear()
-        } {
+            if flags.teack().bit_is_set() && flags.reack().bit_is_set() {
+                return Ok(());
+            }
             core::hint::spin_loop();
         }
+
+        Err(InitErrorKind::PeripheralNotReady)
     }
 }
 
@@ -393,12 +489,26 @@ fn regs<UART: Instance>() -> &'static RegisterBlock {
 }
 
 #[inline(always)]
-fn calc_baudrate_divisor(baudrate: u32) -> u16 {
-    let sys_clock: u32 = system_clock().into();
-    let clock = sys_clock / (DIV_AHB + 1) / (DIV_APB_P + 1);
-    let divisor = clock / baudrate;
+fn calc_baudrate_divisor(baudrate: u32) -> Result<u16, ConfigError> {
+    if baudrate == 0 {
+        return Err(ConfigError::ZeroBaudrate);
+    }
 
-    divisor.clamp(16, u16::MAX as u32) as u16
+    let sys_clock: u32 = system_clock().into();
+    let p = unsafe { Peripherals::steal() };
+    let ahb_divisor = p.pm.div_ahb().read().bits().saturating_add(1);
+    let apb_p_divisor = p.pm.div_apb_p().read().bits().saturating_add(1);
+    let clock = sys_clock / ahb_divisor / apb_p_divisor;
+    let divisor = (u64::from(clock) + u64::from(baudrate) / 2) / u64::from(baudrate);
+
+    if divisor < 16 {
+        return Err(ConfigError::BaudrateTooHigh);
+    }
+    if divisor > u64::from(u16::MAX) {
+        return Err(ConfigError::BaudrateTooLow);
+    }
+
+    Ok(divisor as u16)
 }
 
 fn nb_block<T, E>(mut f: impl FnMut() -> NbResult<T, E>) -> Result<T, E> {
