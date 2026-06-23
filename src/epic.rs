@@ -8,7 +8,7 @@
 //! а не по одной, так как при записи в регистр mask_level_set перезаписывается вся маска целиком
 use core::option::Option;
 use core::u32;
-use mik32_pac::Epic;
+use mik32_pac::{Epic, Peripherals};
 
 /// Тип срабатывания прерывания
 ///
@@ -60,6 +60,13 @@ pub enum InterruptLine {
     DAC1 = 1 << 31,             // DAC1 - линия 31
 }
 
+impl InterruptLine {
+    #[inline(always)]
+    pub const fn mask(self) -> u32 {
+        self as u32
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
     LineLevelSet,
@@ -93,6 +100,16 @@ impl EPIC {
     /// let mut epic = EPIC::new(dp.epic);
     /// ```
     pub fn new(dp: Epic) -> Self {
+        // EPIC sits on the APB_M clock domain. The C HAL enables this clock
+        // before accessing EPIC registers; do the same here so the driver is
+        // ready to use right after construction.
+        unsafe {
+            Peripherals::steal()
+                .pm
+                .clk_apb_m_set()
+                .write(|w| w.epic().enable());
+        }
+
         Self {
             dp: dp,
             line_mask: 0u32,
@@ -127,23 +144,24 @@ impl EPIC {
     /// epic.listen(InterruptLine::Timer32_1); // Включим прерывание по линии таймера
     /// ```
     pub fn listen(&mut self, line: InterruptLine, trigger: Trigger) -> Result<(), Error> {
+        let line_mask = line.mask();
+
         match trigger {
             Trigger::Edge => {
-                if self.line_mask & (line as u32) != 0 {
+                if self.line_mask & line_mask != 0 {
                     return Err(Error::LineLevelSet);
                 }
 
                 self.dp
                     .mask_edge_set()
-                    .modify(|_, w| unsafe { w.bits(line as u32) });
+                    .write(|w| unsafe { w.bits(line_mask) });
             }
             Trigger::Level => {
-                self.line_mask = self.line_mask | (line as u32);
-
-                if self.dp.mask_edge_set().read().bits() & self.line_mask != 0 {
+                if self.dp.mask_edge_set().read().bits() & line_mask != 0 {
                     return Err(Error::LineEdgeSet);
                 }
 
+                self.line_mask |= line_mask;
                 self.dp
                     .mask_level_set()
                     .write(|w| unsafe { w.bits(self.line_mask) });
@@ -171,21 +189,23 @@ impl EPIC {
     /// ```
     pub fn unlisten(&mut self, line: Option<InterruptLine>) {
         if let Some(line) = line {
+            let line_mask = line.mask();
+
             // Выключаем "по фронту"
             self.dp
                 .mask_edge_clear()
-                .modify(|_, w| unsafe { w.bits(line as u32) });
+                .write(|w| unsafe { w.bits(line_mask) });
 
             // Выключаем "по уровню"
-            self.line_mask = self.line_mask & !(line as u32);
+            self.line_mask &= !line_mask;
             self.dp
                 .mask_level_clear()
-                .write(|w| unsafe { w.bits(line as u32) });
+                .write(|w| unsafe { w.bits(line_mask) });
         } else {
             // Выключаем все "по фронту"
             self.dp
                 .mask_edge_clear()
-                .modify(|_, w| unsafe { w.bits(u32::MAX) });
+                .write(|w| unsafe { w.bits(u32::MAX) });
 
             // Выключаем все "по уровню"
             self.line_mask = 0u32;
@@ -216,104 +236,47 @@ impl EPIC {
     /// let is_timer_event_happend: bool = epic.event(InterruptLine::Timer32_1);
     /// ```
     pub fn event(&self, line: InterruptLine) -> bool {
-        match line {
-            InterruptLine::ADC => {
-                return self.dp.raw_status().read().adc().bit_is_set();
-            }
-            InterruptLine::DAC0 => {
-                return self.dp.raw_status().read().dac0().bit_is_set();
-            }
-            InterruptLine::DAC1 => {
-                return self.dp.raw_status().read().dac1().bit_is_set();
-            }
-            InterruptLine::DMA => {
-                return self.dp.raw_status().read().dma().bit_is_set();
-            }
-            InterruptLine::EEPROM => {
-                return self.dp.raw_status().read().eeprom().bit_is_set();
-            }
-            InterruptLine::FrequencyMonitor => {
-                return self.dp.raw_status().read().frequency_monitor().bit_is_set();
-            }
-            InterruptLine::GPIO => {
-                return self.dp.raw_status().read().gpio().bit_is_set();
-            }
-            InterruptLine::I2C0 => {
-                return self.dp.raw_status().read().i2c_0().bit_is_set();
-            }
-            InterruptLine::I2C1 => {
-                return self.dp.raw_status().read().i2c_1().bit_is_set();
-            }
-            InterruptLine::AVCCOver => {
-                return self.dp.raw_status().read().pvd_avcc_over().bit_is_set();
-            }
-            InterruptLine::AVCCUnder => {
-                return self.dp.raw_status().read().pvd_avcc_under().bit_is_set();
-            }
-            InterruptLine::VCCOver => {
-                return self.dp.raw_status().read().pvd_vcc_over().bit_is_set();
-            }
-            InterruptLine::VCCUnder => {
-                return self.dp.raw_status().read().pvd_vcc_under().bit_is_set();
-            }
-            InterruptLine::RTC => {
-                return self.dp.raw_status().read().rtc().bit_is_set();
-            }
-            InterruptLine::SPI0 => {
-                return self.dp.raw_status().read().spi_0().bit_is_set();
-            }
-            InterruptLine::SPI1 => {
-                return self.dp.raw_status().read().spi_1().bit_is_set();
-            }
-            InterruptLine::SPIFI => {
-                return self.dp.raw_status().read().spifi().bit_is_set();
-            }
-            InterruptLine::LowBattery => {
-                return self.dp.raw_status().read().battery_non_good().bit_is_set();
-            }
-            InterruptLine::Timer16_0 => {
-                return self.dp.raw_status().read().timer16_0().bit_is_set();
-            }
-            InterruptLine::Timer16_1 => {
-                return self.dp.raw_status().read().timer16_1().bit_is_set();
-            }
-            InterruptLine::Timer16_2 => {
-                return self.dp.raw_status().read().timer16_2().bit_is_set();
-            }
-            InterruptLine::Timer32_0 => {
-                return self.dp.raw_status().read().timer32_0().bit_is_set();
-            }
-            InterruptLine::Timer32_1 => {
-                return self.dp.raw_status().read().timer32_1().bit_is_set();
-            }
-            InterruptLine::Timer32_2 => {
-                return self.dp.raw_status().read().timer32_2().bit_is_set();
-            }
-            InterruptLine::TSENS => {
-                return self.dp.raw_status().read().tsens().bit_is_set();
-            }
-            InterruptLine::USART0 => {
-                return self.dp.raw_status().read().usart_0().bit_is_set();
-            }
-            InterruptLine::USART1 => {
-                return self.dp.raw_status().read().usart_1().bit_is_set();
-            }
-            InterruptLine::WDT => {
-                return self.dp.raw_status().read().wdt().bit_is_set();
-            }
-            InterruptLine::WdtDom3 => {
-                return self.dp.raw_status().read().wdt_bus_dom3().bit_is_set();
-            }
-            InterruptLine::WdtEeprom => {
-                return self.dp.raw_status().read().wdt_bus_eeprom().bit_is_set();
-            }
-            InterruptLine::WdtSpifi => {
-                return self.dp.raw_status().read().wdt_bus_spifi().bit_is_set();
-            }
-            InterruptLine::BrownOut => {
-                return self.dp.raw_status().read().bor().bit_is_set();
-            }
-        }
+        self.raw_pending(line)
+    }
+
+    /// Returns true when a configured, unmasked interrupt is pending.
+    ///
+    /// Reads EPIC `STATUS`, which is the right register for dispatching from a
+    /// trap handler because it takes EPIC masks into account.
+    pub fn pending(&self, line: InterruptLine) -> bool {
+        self.pending_mask() & line.mask() != 0
+    }
+
+    /// Returns the full EPIC `STATUS` register.
+    pub fn pending_mask(&self) -> u32 {
+        self.dp.status().read().bits()
+    }
+
+    /// Returns true when the interrupt line is asserted regardless of masks.
+    ///
+    /// Reads EPIC `RAW_STATUS`.
+    pub fn raw_pending(&self, line: InterruptLine) -> bool {
+        self.raw_pending_mask() & line.mask() != 0
+    }
+
+    /// Returns the full EPIC `RAW_STATUS` register.
+    pub fn raw_pending_mask(&self) -> u32 {
+        self.dp.raw_status().read().bits()
+    }
+
+    /// Clears the pending flag for one interrupt line.
+    pub fn clear_line(&mut self, line: InterruptLine) {
+        self.clear_mask(line.mask());
+    }
+
+    /// Clears pending flags selected by `mask`.
+    pub fn clear_mask(&mut self, mask: u32) {
+        self.dp.clear().write(|w| unsafe { w.bits(mask) });
+    }
+
+    /// Clears pending flags for all interrupt lines.
+    pub fn clear_all(&mut self) {
+        self.clear_mask(u32::MAX);
     }
 
     ///  Очищает флаги всех прерываний
@@ -328,6 +291,6 @@ impl EPIC {
     /// epic.unlisten(InterruptLine::Timer32_1); // Выключим прерывание по линии таймера
     /// ```
     pub fn clear(&mut self) {
-        self.dp.clear().write(|w| unsafe { w.bits(0xFFFFFFFF) });
+        self.clear_all();
     }
 }
