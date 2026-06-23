@@ -383,6 +383,7 @@ pub mod port_1 {
 
     pub type Pin06 = Pin<1, 6>;
     impl OutputPermitted for Pin<1, 6> {}
+    impl TimerSerialPermitted for Pin<1, 6> {}
 
     pub type Pin07 = Pin<1, 7>;
     impl OutputPermitted for Pin<1, 7> {}
@@ -401,21 +402,27 @@ pub mod port_1 {
 
     pub type Pin10 = Pin<1, 10>;
     impl OutputPermitted for Pin<1, 10> {}
+    impl SerialPermitted for Pin<1, 10> {}
 
     pub type Pin11 = Pin<1, 11>;
     impl OutputPermitted for Pin<1, 11> {}
+    impl SerialPermitted for Pin<1, 11> {}
 
     pub type Pin12 = Pin<1, 12>;
     impl OutputPermitted for Pin<1, 12> {}
+    impl TimerSerialPermitted for Pin<1, 12> {}
 
     pub type Pin13 = Pin<1, 13>;
     impl OutputPermitted for Pin<1, 13> {}
+    impl TimerSerialPermitted for Pin<1, 13> {}
 
     pub type Pin14 = Pin<1, 14>;
     impl OutputPermitted for Pin<1, 14> {}
+    impl TimerSerialPermitted for Pin<1, 14> {}
 
     pub type Pin15 = Pin<1, 15>;
     impl OutputPermitted for Pin<1, 15> {}
+    impl TimerSerialPermitted for Pin<1, 15> {}
 }
 
 pub mod port_2 {
@@ -423,15 +430,19 @@ pub mod port_2 {
 
     pub type Pin00 = Pin<2, 0>;
     impl OutputPermitted for Pin<2, 0> {}
+    impl TimerSerialPermitted for Pin<2, 0> {}
 
     pub type Pin01 = Pin<2, 1>;
     impl OutputPermitted for Pin<2, 1> {}
+    impl TimerSerialPermitted for Pin<2, 1> {}
 
     pub type Pin02 = Pin<2, 2>;
     impl OutputPermitted for Pin<2, 2> {}
+    impl TimerSerialPermitted for Pin<2, 2> {}
 
     pub type Pin03 = Pin<2, 3>;
     impl OutputPermitted for Pin<2, 3> {}
+    impl TimerSerialPermitted for Pin<2, 3> {}
 
     pub type Pin04 = Pin<2, 4>;
     impl OutputPermitted for Pin<2, 4> {}
@@ -445,4 +456,5 @@ pub mod port_2 {
 
     pub type Pin07 = Pin<2, 7>;
     impl OutputPermitted for Pin<2, 7> {}
+    impl TimerSerialPermitted for Pin<2, 7> {}
 }

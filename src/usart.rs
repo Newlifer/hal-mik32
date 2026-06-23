@@ -68,6 +68,42 @@ pub enum DmaConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitOrder {
+    LsbFirst,
+    MsbFirst,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowControl {
+    None,
+    Rts,
+    Cts,
+    RtsCts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RtsMode {
+    AlwaysEnabled,
+    Modem,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModemConfig {
+    pub dtr: bool,
+}
+
+impl ModemConfig {
+    pub const fn disabled() -> Self {
+        Self { dtr: false }
+    }
+
+    pub const fn dtr(mut self, enabled: bool) -> Self {
+        self.dtr = enabled;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
     pub baudrate: u32,
     pub word_length: WordLength,
@@ -78,6 +114,17 @@ pub struct Config {
     pub clock_polarity: ClockPolarity,
     pub clock_phase: ClockPhase,
     pub clock_last_bit: bool,
+    pub bit_order: BitOrder,
+    pub data_inversion: bool,
+    pub tx_inversion: bool,
+    pub rx_inversion: bool,
+    pub swap_pins: bool,
+    pub loopback: bool,
+    pub tx_break: bool,
+    pub overwrite: bool,
+    pub flow_control: FlowControl,
+    pub rts_mode: RtsMode,
+    pub modem: ModemConfig,
     pub dma: DmaConfig,
     pub init_timeout: u32,
 }
@@ -94,6 +141,17 @@ impl Config {
             clock_polarity: ClockPolarity::IdleLow,
             clock_phase: ClockPhase::FirstEdge,
             clock_last_bit: false,
+            bit_order: BitOrder::LsbFirst,
+            data_inversion: false,
+            tx_inversion: false,
+            rx_inversion: false,
+            swap_pins: false,
+            loopback: false,
+            tx_break: false,
+            overwrite: false,
+            flow_control: FlowControl::None,
+            rts_mode: RtsMode::AlwaysEnabled,
+            modem: ModemConfig::disabled(),
             dma: DmaConfig::None,
             init_timeout: DEFAULT_INIT_TIMEOUT,
         }
@@ -141,6 +199,61 @@ impl Config {
 
     pub const fn clock_last_bit(mut self, enabled: bool) -> Self {
         self.clock_last_bit = enabled;
+        self
+    }
+
+    pub const fn bit_order(mut self, bit_order: BitOrder) -> Self {
+        self.bit_order = bit_order;
+        self
+    }
+
+    pub const fn data_inversion(mut self, enabled: bool) -> Self {
+        self.data_inversion = enabled;
+        self
+    }
+
+    pub const fn tx_inversion(mut self, enabled: bool) -> Self {
+        self.tx_inversion = enabled;
+        self
+    }
+
+    pub const fn rx_inversion(mut self, enabled: bool) -> Self {
+        self.rx_inversion = enabled;
+        self
+    }
+
+    pub const fn swap_pins(mut self, enabled: bool) -> Self {
+        self.swap_pins = enabled;
+        self
+    }
+
+    pub const fn loopback(mut self, enabled: bool) -> Self {
+        self.loopback = enabled;
+        self
+    }
+
+    pub const fn tx_break(mut self, enabled: bool) -> Self {
+        self.tx_break = enabled;
+        self
+    }
+
+    pub const fn overwrite(mut self, enabled: bool) -> Self {
+        self.overwrite = enabled;
+        self
+    }
+
+    pub const fn flow_control(mut self, flow_control: FlowControl) -> Self {
+        self.flow_control = flow_control;
+        self
+    }
+
+    pub const fn rts_mode(mut self, mode: RtsMode) -> Self {
+        self.rts_mode = mode;
+        self
+    }
+
+    pub const fn modem(mut self, modem: ModemConfig) -> Self {
+        self.modem = modem;
         self
     }
 
@@ -265,16 +378,85 @@ pub trait TxPin<UART> {}
 pub trait RxPin<UART> {}
 pub trait ClockPin<UART> {}
 pub trait HalfDuplexPin<UART> {}
+pub trait RtsPin<UART> {}
+pub trait CtsPin<UART> {}
+pub trait DtrPin<UART> {}
+pub trait DsrPin<UART> {}
+pub trait DcdPin<UART> {}
+pub trait RiPin<UART> {}
+pub trait DdisPin<UART> {}
+
+pub trait FlowControlPins<UART> {
+    const FLOW_CONTROL: FlowControl;
+}
+
+pub struct CtsOnly<CTS>(pub CTS);
+
+impl<UART> FlowControlPins<UART> for () {
+    const FLOW_CONTROL: FlowControl = FlowControl::None;
+}
+
+impl<UART, RTS> FlowControlPins<UART> for (RTS,)
+where
+    RTS: RtsPin<UART>,
+{
+    const FLOW_CONTROL: FlowControl = FlowControl::Rts;
+}
+
+impl<UART, RTS, CTS> FlowControlPins<UART> for (RTS, CTS)
+where
+    RTS: RtsPin<UART>,
+    CTS: CtsPin<UART>,
+{
+    const FLOW_CONTROL: FlowControl = FlowControl::RtsCts;
+}
+
+impl<UART, CTS> FlowControlPins<UART> for CtsOnly<CTS>
+where
+    CTS: CtsPin<UART>,
+{
+    const FLOW_CONTROL: FlowControl = FlowControl::Cts;
+}
+
+pub trait ModemPins<UART> {}
+
+impl<UART> ModemPins<UART> for () {}
 
 impl TxPin<Usart0> for Pin<0, 6, Func2Mode> {}
 impl RxPin<Usart0> for Pin<0, 5, Func2Mode> {}
+impl CtsPin<Usart0> for Pin<0, 7, Func2Mode> {}
+impl RtsPin<Usart0> for Pin<0, 8, Func2Mode> {}
+impl DdisPin<Usart0> for Pin<1, 6, Func3Mode> {}
+impl DtrPin<Usart0> for Pin<1, 12, Func3Mode> {}
+impl DcdPin<Usart0> for Pin<1, 13, Func3Mode> {}
+impl DsrPin<Usart0> for Pin<1, 14, Func3Mode> {}
+impl RiPin<Usart0> for Pin<1, 15, Func3Mode> {}
 
 impl TxPin<Usart1> for Pin<1, 9, Func2Mode> {}
 impl RxPin<Usart1> for Pin<1, 8, Func2Mode> {}
+impl CtsPin<Usart1> for Pin<1, 10, Func2Mode> {}
+impl RtsPin<Usart1> for Pin<1, 11, Func2Mode> {}
 impl ClockPin<Usart0> for Pin<1, 5, Func3Mode> {}
 impl ClockPin<Usart1> for Pin<2, 6, Func3Mode> {}
+impl DtrPin<Usart1> for Pin<2, 0, Func3Mode> {}
+impl DcdPin<Usart1> for Pin<2, 1, Func3Mode> {}
+impl DsrPin<Usart1> for Pin<2, 2, Func3Mode> {}
+impl RiPin<Usart1> for Pin<2, 3, Func3Mode> {}
+impl DdisPin<Usart1> for Pin<2, 7, Func3Mode> {}
 impl HalfDuplexPin<Usart0> for Pin<0, 6, Func2Mode> {}
 impl HalfDuplexPin<Usart1> for Pin<1, 9, Func2Mode> {}
+
+impl<UART, DTR> ModemPins<UART> for (DTR,) where DTR: DtrPin<UART> {}
+
+impl<UART, DTR, DSR, DCD, RI, DDIS> ModemPins<UART> for (DTR, DSR, DCD, RI, DDIS)
+where
+    DTR: DtrPin<UART>,
+    DSR: DsrPin<UART>,
+    DCD: DcdPin<UART>,
+    RI: RiPin<UART>,
+    DDIS: DdisPin<UART>,
+{
+}
 
 mod sealed {
     pub trait Sealed {}
@@ -328,13 +510,60 @@ where
     word_length: WordLength,
 }
 
-pub struct Tx<UART: Instance> {
+pub struct TxOnly<UART, TXPIN>
+where
+    UART: Instance,
+    TXPIN: TxPin<UART>,
+{
+    tx: Tx<UART, TXPIN, Owned>,
+}
+
+pub struct RxOnly<UART, RXPIN>
+where
+    UART: Instance,
+    RXPIN: RxPin<UART>,
+{
+    rx: Rx<UART, RXPIN, Owned>,
+}
+
+pub struct FlowControlSerial<UART, TXPIN, RXPIN, FLOWPINS>
+where
+    UART: Instance,
+    TXPIN: TxPin<UART>,
+    RXPIN: RxPin<UART>,
+    FLOWPINS: FlowControlPins<UART>,
+{
+    serial: Serial<UART, TXPIN, RXPIN>,
+    flow_pins: FLOWPINS,
+}
+
+pub struct ModemSerial<UART, TXPIN, RXPIN, MODEMPINS>
+where
+    UART: Instance,
+    TXPIN: TxPin<UART>,
+    RXPIN: RxPin<UART>,
+    MODEMPINS: ModemPins<UART>,
+{
+    serial: Serial<UART, TXPIN, RXPIN>,
+    modem_pins: MODEMPINS,
+}
+
+pub struct Owned;
+pub struct Borrowed;
+
+pub struct Tx<UART: Instance, TXPIN = (), OWNER = Owned> {
+    uart: Option<UART>,
+    pin: TXPIN,
     _uart: PhantomData<UART>,
+    _owner: PhantomData<OWNER>,
     word_length: WordLength,
 }
 
-pub struct Rx<UART: Instance> {
+pub struct Rx<UART: Instance, RXPIN = (), OWNER = Owned> {
+    uart: Option<UART>,
+    pin: RXPIN,
     _uart: PhantomData<UART>,
+    _owner: PhantomData<OWNER>,
     word_length: WordLength,
 }
 
@@ -348,8 +577,8 @@ pub struct Rx<UART: Instance> {
 ///
 /// Dropping this value aborts the DMA channel and restores the USART DMA
 /// request bit to the state it had before the transfer was started.
-pub struct TxDmaTransfer<UART: Instance, CHANNEL: DmaChannelId, BUFFER> {
-    tx: Option<Tx<UART>>,
+pub struct TxDmaTransfer<UART: Instance, TXPIN, OWNER, CHANNEL: DmaChannelId, BUFFER> {
+    tx: Option<Tx<UART, TXPIN, OWNER>>,
     channel: Option<DmaChannel<CHANNEL>>,
     buffer: Option<BUFFER>,
     request_was_enabled: bool,
@@ -365,8 +594,8 @@ pub struct TxDmaTransfer<UART: Instance, CHANNEL: DmaChannelId, BUFFER> {
 ///
 /// Dropping this value aborts the DMA channel and restores the USART DMA
 /// request bit to the state it had before the transfer was started.
-pub struct RxDmaTransfer<UART: Instance, CHANNEL: DmaChannelId, BUFFER> {
-    rx: Option<Rx<UART>>,
+pub struct RxDmaTransfer<UART: Instance, RXPIN, OWNER, CHANNEL: DmaChannelId, BUFFER> {
+    rx: Option<Rx<UART, RXPIN, OWNER>>,
     channel: Option<DmaChannel<CHANNEL>>,
     buffer: Option<BUFFER>,
     request_was_enabled: bool,
@@ -404,7 +633,11 @@ where
         pins: (TXPIN, RXPIN),
         config: Config,
     ) -> Result<Self, InitError<UART, TXPIN, RXPIN>> {
-        if config.duplex_mode != DuplexMode::Full || config.sync_mode != SyncMode::Async {
+        if config.duplex_mode != DuplexMode::Full
+            || config.sync_mode != SyncMode::Async
+            || config.flow_control != FlowControl::None
+            || config.modem.dtr
+        {
             return Err(InitError {
                 uart,
                 pins,
@@ -445,7 +678,7 @@ where
             pins,
             word_length: config.word_length,
         };
-        if let Err(error) = configure_uart::<UART>(config, baudrate_divisor) {
+        if let Err(error) = configure_uart::<UART>(config, baudrate_divisor, true, true) {
             serial.regs().control1().modify(|_, w| w.ue().disable());
             let Self {
                 uart,
@@ -458,27 +691,323 @@ where
         Ok(serial)
     }
 
-    pub fn split(self) -> (Tx<UART>, Rx<UART>) {
-        let _ = self.uart;
-        let _ = self.pins;
-        let word_length = self.word_length;
+    pub fn release(self) -> (UART, (TXPIN, RXPIN)) {
+        regs::<UART>().control1().modify(|_, w| w.ue().disable());
+        (self.uart, self.pins)
+    }
+
+    pub fn split(self) -> (Tx<UART, TXPIN, Owned>, Rx<UART, RXPIN, Borrowed>) {
+        let Self {
+            uart,
+            pins: (tx_pin, rx_pin),
+            word_length,
+        } = self;
 
         (
             Tx {
+                uart: Some(uart),
+                pin: tx_pin,
                 _uart: PhantomData,
+                _owner: PhantomData,
                 word_length,
             },
             Rx {
+                uart: None,
+                pin: rx_pin,
                 _uart: PhantomData,
+                _owner: PhantomData,
                 word_length,
             },
         )
+    }
+
+    pub fn reunite(
+        tx: Tx<UART, TXPIN, Owned>,
+        rx: Rx<UART, RXPIN, Borrowed>,
+    ) -> Serial<UART, TXPIN, RXPIN> {
+        let Tx {
+            uart,
+            pin: tx_pin,
+            word_length,
+            ..
+        } = tx;
+        let Rx { pin: rx_pin, .. } = rx;
+        Serial {
+            uart: uart.expect("split Tx missing USART owner"),
+            pins: (tx_pin, rx_pin),
+            word_length,
+        }
     }
 
     #[inline(always)]
     fn regs(&self) -> &RegisterBlock {
         unsafe { &*UART::ptr() }
     }
+}
+
+impl<UART, TXPIN> TxOnly<UART, TXPIN>
+where
+    UART: Instance,
+    TXPIN: TxPin<UART>,
+{
+    pub fn new(uart: UART, pin: TXPIN, config: Config) -> Result<Self, ModeInitError<UART, TXPIN>> {
+        let tx = new_tx_only(uart, pin, config)?;
+        Ok(Self { tx })
+    }
+
+    pub fn split(self) -> Tx<UART, TXPIN, Owned> {
+        self.tx
+    }
+
+    pub fn release(self) -> (UART, TXPIN) {
+        self.tx.release()
+    }
+}
+
+impl<UART, RXPIN> RxOnly<UART, RXPIN>
+where
+    UART: Instance,
+    RXPIN: RxPin<UART>,
+{
+    pub fn new(uart: UART, pin: RXPIN, config: Config) -> Result<Self, ModeInitError<UART, RXPIN>> {
+        let rx = new_rx_only(uart, pin, config)?;
+        Ok(Self { rx })
+    }
+
+    pub fn split(self) -> Rx<UART, RXPIN, Owned> {
+        self.rx
+    }
+
+    pub fn release(self) -> (UART, RXPIN) {
+        self.rx.release()
+    }
+}
+
+impl<UART, TXPIN, RXPIN, FLOWPINS> FlowControlSerial<UART, TXPIN, RXPIN, FLOWPINS>
+where
+    UART: Instance,
+    TXPIN: TxPin<UART>,
+    RXPIN: RxPin<UART>,
+    FLOWPINS: FlowControlPins<UART>,
+{
+    pub fn new(
+        uart: UART,
+        pins: (TXPIN, RXPIN, FLOWPINS),
+        mut config: Config,
+    ) -> Result<Self, ModeInitError<UART, (TXPIN, RXPIN, FLOWPINS)>> {
+        config.flow_control = FLOWPINS::FLOW_CONTROL;
+        let (tx, rx, flow_pins) = pins;
+        match Serial::new_configured(uart, (tx, rx), config) {
+            Ok(serial) => Ok(Self { serial, flow_pins }),
+            Err(error) => {
+                let (uart, (tx, rx), error) = error.into_parts();
+                Err(ModeInitError {
+                    uart,
+                    pins: (tx, rx, flow_pins),
+                    error,
+                })
+            }
+        }
+    }
+
+    pub fn release(self) -> (UART, (TXPIN, RXPIN, FLOWPINS)) {
+        let (uart, (tx, rx)) = self.serial.release();
+        (uart, (tx, rx, self.flow_pins))
+    }
+
+    pub fn split(self) -> (Tx<UART, TXPIN, Owned>, Rx<UART, RXPIN, Borrowed>, FLOWPINS) {
+        let flow_pins = self.flow_pins;
+        let (tx, rx) = self.serial.split();
+        (tx, rx, flow_pins)
+    }
+}
+
+impl<UART, TXPIN, RXPIN, MODEMPINS> ModemSerial<UART, TXPIN, RXPIN, MODEMPINS>
+where
+    UART: Instance,
+    TXPIN: TxPin<UART>,
+    RXPIN: RxPin<UART>,
+    MODEMPINS: ModemPins<UART>,
+{
+    pub fn new(
+        uart: UART,
+        pins: (TXPIN, RXPIN, MODEMPINS),
+        config: Config,
+    ) -> Result<Self, ModeInitError<UART, (TXPIN, RXPIN, MODEMPINS)>> {
+        let (tx, rx, modem_pins) = pins;
+        match Serial::new_configured(uart, (tx, rx), config) {
+            Ok(serial) => Ok(Self { serial, modem_pins }),
+            Err(error) => {
+                let (uart, (tx, rx), error) = error.into_parts();
+                Err(ModeInitError {
+                    uart,
+                    pins: (tx, rx, modem_pins),
+                    error,
+                })
+            }
+        }
+    }
+
+    pub fn set_dtr(&mut self, ready: bool) {
+        regs::<UART>().modem().modify(|_, w| w.dtr().bit(ready));
+    }
+
+    pub fn is_dtr_ready(&self) -> bool {
+        regs::<UART>().modem().read().dtr().bit_is_set()
+    }
+
+    pub fn is_dsr_high(&self) -> bool {
+        regs::<UART>().modem().read().dsr().bit_is_set()
+    }
+
+    pub fn dsr_changed(&self) -> bool {
+        regs::<UART>().modem().read().dsrif().bit_is_set()
+    }
+
+    pub fn clear_dsr_changed(&mut self) {
+        regs::<UART>()
+            .modem()
+            .write(|w| w.dsrif().clear_bit_by_one());
+    }
+
+    pub fn is_dcd_high(&self) -> bool {
+        regs::<UART>().modem().read().dcd().bit_is_set()
+    }
+
+    pub fn dcd_changed(&self) -> bool {
+        regs::<UART>().modem().read().dcdif().bit_is_set()
+    }
+
+    pub fn clear_dcd_changed(&mut self) {
+        regs::<UART>()
+            .modem()
+            .write(|w| w.dcdif().clear_bit_by_one());
+    }
+
+    pub fn is_ri_high(&self) -> bool {
+        regs::<UART>().modem().read().ri().bit_is_set()
+    }
+
+    pub fn ri_changed(&self) -> bool {
+        regs::<UART>().modem().read().riif().bit_is_set()
+    }
+
+    pub fn clear_ri_changed(&mut self) {
+        regs::<UART>()
+            .modem()
+            .write(|w| w.riif().clear_bit_by_one());
+    }
+
+    pub fn release(self) -> (UART, (TXPIN, RXPIN, MODEMPINS)) {
+        let (uart, (tx, rx)) = self.serial.release();
+        (uart, (tx, rx, self.modem_pins))
+    }
+
+    pub fn split(self) -> (Tx<UART, TXPIN, Owned>, Rx<UART, RXPIN, Borrowed>, MODEMPINS) {
+        let modem_pins = self.modem_pins;
+        let (tx, rx) = self.serial.split();
+        (tx, rx, modem_pins)
+    }
+}
+
+fn new_tx_only<UART, TXPIN>(
+    uart: UART,
+    pin: TXPIN,
+    mut config: Config,
+) -> Result<Tx<UART, TXPIN, Owned>, ModeInitError<UART, TXPIN>>
+where
+    UART: Instance,
+    TXPIN: TxPin<UART>,
+{
+    if let Err(error) = config.validate() {
+        return Err(ModeInitError {
+            uart,
+            pins: pin,
+            error: InitErrorKind::InvalidConfig(error),
+        });
+    }
+
+    let baudrate_divisor = match calc_baudrate_divisor(config.baudrate) {
+        Ok(divisor) => divisor,
+        Err(error) => {
+            return Err(ModeInitError {
+                uart,
+                pins: pin,
+                error: InitErrorKind::InvalidConfig(error),
+            });
+        }
+    };
+
+    config.duplex_mode = DuplexMode::Full;
+    config.sync_mode = SyncMode::Async;
+    UART::enable_clock();
+
+    if let Err(error) = configure_uart::<UART>(config, baudrate_divisor, true, false) {
+        regs::<UART>().control1().modify(|_, w| w.ue().disable());
+        return Err(ModeInitError {
+            uart,
+            pins: pin,
+            error,
+        });
+    }
+
+    Ok(Tx {
+        uart: Some(uart),
+        pin,
+        _uart: PhantomData,
+        _owner: PhantomData,
+        word_length: config.word_length,
+    })
+}
+
+fn new_rx_only<UART, RXPIN>(
+    uart: UART,
+    pin: RXPIN,
+    mut config: Config,
+) -> Result<Rx<UART, RXPIN, Owned>, ModeInitError<UART, RXPIN>>
+where
+    UART: Instance,
+    RXPIN: RxPin<UART>,
+{
+    if let Err(error) = config.validate() {
+        return Err(ModeInitError {
+            uart,
+            pins: pin,
+            error: InitErrorKind::InvalidConfig(error),
+        });
+    }
+
+    let baudrate_divisor = match calc_baudrate_divisor(config.baudrate) {
+        Ok(divisor) => divisor,
+        Err(error) => {
+            return Err(ModeInitError {
+                uart,
+                pins: pin,
+                error: InitErrorKind::InvalidConfig(error),
+            });
+        }
+    };
+
+    config.duplex_mode = DuplexMode::Full;
+    config.sync_mode = SyncMode::Async;
+    UART::enable_clock();
+
+    if let Err(error) = configure_uart::<UART>(config, baudrate_divisor, false, true) {
+        regs::<UART>().control1().modify(|_, w| w.ue().disable());
+        return Err(ModeInitError {
+            uart,
+            pins: pin,
+            error,
+        });
+    }
+
+    Ok(Rx {
+        uart: Some(uart),
+        pin,
+        _uart: PhantomData,
+        _owner: PhantomData,
+        word_length: config.word_length,
+    })
 }
 
 impl<UART, TXPIN, RXPIN, CLOCKPIN> SynchronousSerial<UART, TXPIN, RXPIN, CLOCKPIN>
@@ -510,9 +1039,14 @@ where
         }
     }
 
-    pub fn split(self) -> (Tx<UART>, Rx<UART>, CLOCKPIN) {
+    pub fn split(self) -> (Tx<UART, TXPIN, Owned>, Rx<UART, RXPIN, Borrowed>, CLOCKPIN) {
         let (tx, rx) = self.serial.split();
         (tx, rx, self.clock)
+    }
+
+    pub fn release(self) -> (UART, (TXPIN, RXPIN, CLOCKPIN)) {
+        let (uart, (tx, rx)) = self.serial.release();
+        (uart, (tx, rx, self.clock))
     }
 }
 
@@ -545,7 +1079,7 @@ where
         config.sync_mode = SyncMode::Async;
         UART::enable_clock();
 
-        if let Err(error) = configure_uart::<UART>(config, baudrate_divisor) {
+        if let Err(error) = configure_uart::<UART>(config, baudrate_divisor, true, true) {
             regs::<UART>().control1().modify(|_, w| w.ue().disable());
             return Err(ModeInitError {
                 uart,
@@ -570,6 +1104,8 @@ where
 fn configure_uart<UART: Instance>(
     config: Config,
     baudrate_divisor: u16,
+    enable_tx: bool,
+    enable_rx: bool,
 ) -> Result<(), InitErrorKind> {
     let regs = regs::<UART>();
 
@@ -616,7 +1152,7 @@ fn configure_uart<UART: Instance>(
             .ctse()
             .ignored()
             .rtse()
-            ._0()
+            .bit(false)
     });
 
     match config.word_length {
@@ -655,7 +1191,38 @@ fn configure_uart<UART: Instance>(
             .bit(config.clock_phase == ClockPhase::SecondEdge)
             .lbcl()
             .bit(config.clock_last_bit)
+            .msbfirst()
+            .bit(config.bit_order == BitOrder::MsbFirst)
+            .datainv()
+            .bit(config.data_inversion)
+            .txinv()
+            .bit(config.tx_inversion)
+            .rxinv()
+            .bit(config.rx_inversion)
+            .swap()
+            .bit(config.swap_pins)
+            .lbm()
+            .bit(config.loopback)
     });
+
+    regs.control3().modify(|_, w| {
+        w.sbkrq()
+            .bit(config.tx_break)
+            .ovrdis()
+            .bit(config.overwrite)
+            .rtse()
+            .bit(
+                matches!(config.flow_control, FlowControl::Rts | FlowControl::RtsCts)
+                    && config.rts_mode == RtsMode::Modem,
+            )
+            .ctse()
+            .bit(matches!(
+                config.flow_control,
+                FlowControl::Cts | FlowControl::RtsCts
+            ))
+    });
+
+    regs.modem().write(|w| w.dtr().bit(config.modem.dtr));
 
     match config.dma {
         DmaConfig::None => regs
@@ -675,11 +1242,13 @@ fn configure_uart<UART: Instance>(
     regs.flags().write(|w| unsafe { w.bits(0x03ff) });
 
     regs.control1()
-        .modify(|_, w| w.te().enable().re().enable().ue().enable());
+        .modify(|_, w| w.te().bit(enable_tx).re().bit(enable_rx).ue().enable());
 
     for _ in 0..config.init_timeout {
         let flags = regs.flags().read();
-        if flags.teack().bit_is_set() && flags.reack().bit_is_set() {
+        let tx_ready = !enable_tx || flags.teack().bit_is_set();
+        let rx_ready = !enable_rx || flags.reack().bit_is_set();
+        if tx_ready && rx_ready {
             return Ok(());
         }
         core::hint::spin_loop();
@@ -697,11 +1266,31 @@ where
     type Error = ErrorKind;
 }
 
-impl<UART: Instance> ErrorType for Tx<UART> {
+impl<UART: Instance, TXPIN, OWNER> ErrorType for Tx<UART, TXPIN, OWNER> {
     type Error = ErrorKind;
 }
 
-impl<UART: Instance> Tx<UART> {
+impl<UART: Instance, TXPIN, OWNER> Tx<UART, TXPIN, OWNER> {
+    pub fn send_break(&mut self, enabled: bool) {
+        regs::<UART>()
+            .control3()
+            .modify(|_, w| w.sbkrq().bit(enabled));
+    }
+
+    pub fn is_cts_high(&self) -> bool {
+        regs::<UART>().flags().read().cts().bit_is_set()
+    }
+
+    pub fn cts_changed(&self) -> bool {
+        regs::<UART>().flags().read().ctsif().bit_is_set()
+    }
+
+    pub fn clear_cts_changed(&mut self) {
+        regs::<UART>()
+            .flags()
+            .write(|w| w.ctsif().clear_bit_by_one());
+    }
+
     /// Starts a non-blocking DMA write using an 8-bit transmit buffer.
     ///
     /// This method consumes the transmitter, DMA channel and buffer and returns
@@ -725,7 +1314,7 @@ impl<UART: Instance> Tx<UART> {
         mut channel: DmaChannel<CHANNEL>,
         buffer: BUFFER,
     ) -> Result<
-        TxDmaTransfer<UART, CHANNEL, BUFFER>,
+        TxDmaTransfer<UART, TXPIN, OWNER, CHANNEL, BUFFER>,
         DmaTransferFailure<Self, DmaChannel<CHANNEL>, BUFFER>,
     >
     where
@@ -772,7 +1361,7 @@ impl<UART: Instance> Tx<UART> {
         mut channel: DmaChannel<CHANNEL>,
         buffer: BUFFER,
     ) -> Result<
-        TxDmaTransfer<UART, CHANNEL, BUFFER>,
+        TxDmaTransfer<UART, TXPIN, OWNER, CHANNEL, BUFFER>,
         DmaTransferFailure<Self, DmaChannel<CHANNEL>, BUFFER>,
     >
     where
@@ -865,11 +1454,49 @@ impl<UART: Instance> Tx<UART> {
     }
 }
 
-impl<UART: Instance> ErrorType for Rx<UART> {
+impl<UART: Instance, TXPIN> Tx<UART, TXPIN, Owned> {
+    pub fn reunite<RXPIN>(self, rx: Rx<UART, RXPIN, Borrowed>) -> Serial<UART, TXPIN, RXPIN>
+    where
+        TXPIN: TxPin<UART>,
+        RXPIN: RxPin<UART>,
+    {
+        Serial::reunite(self, rx)
+    }
+
+    pub fn release(self) -> (UART, TXPIN) {
+        regs::<UART>().control1().modify(|_, w| w.ue().disable());
+        (
+            self.uart.expect("owned USART Tx missing USART owner"),
+            self.pin,
+        )
+    }
+}
+
+impl<UART: Instance, RXPIN, OWNER> ErrorType for Rx<UART, RXPIN, OWNER> {
     type Error = ErrorKind;
 }
 
-impl<UART: Instance> Rx<UART> {
+impl<UART: Instance, RXPIN, OWNER> Rx<UART, RXPIN, OWNER> {
+    pub fn is_idle(&self) -> bool {
+        regs::<UART>().flags().read().idle().bit_is_set()
+    }
+
+    pub fn clear_idle(&mut self) {
+        regs::<UART>()
+            .flags()
+            .write(|w| w.idle().clear_bit_by_one());
+    }
+
+    pub fn break_detected(&self) -> bool {
+        regs::<UART>().flags().read().lbdf().bit_is_set()
+    }
+
+    pub fn clear_break_detected(&mut self) {
+        regs::<UART>()
+            .flags()
+            .write(|w| w.lbdf().clear_bit_by_one());
+    }
+
     /// Starts a non-blocking DMA read into an 8-bit receive buffer.
     ///
     /// This method consumes the receiver, DMA channel and buffer and returns an
@@ -890,7 +1517,7 @@ impl<UART: Instance> Rx<UART> {
         mut channel: DmaChannel<CHANNEL>,
         mut buffer: BUFFER,
     ) -> Result<
-        RxDmaTransfer<UART, CHANNEL, BUFFER>,
+        RxDmaTransfer<UART, RXPIN, OWNER, CHANNEL, BUFFER>,
         DmaTransferFailure<Self, DmaChannel<CHANNEL>, BUFFER>,
     >
     where
@@ -935,7 +1562,7 @@ impl<UART: Instance> Rx<UART> {
         mut channel: DmaChannel<CHANNEL>,
         mut buffer: BUFFER,
     ) -> Result<
-        RxDmaTransfer<UART, CHANNEL, BUFFER>,
+        RxDmaTransfer<UART, RXPIN, OWNER, CHANNEL, BUFFER>,
         DmaTransferFailure<Self, DmaChannel<CHANNEL>, BUFFER>,
     >
     where
@@ -1011,7 +1638,19 @@ impl<UART: Instance> Rx<UART> {
     }
 }
 
-impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> TxDmaTransfer<UART, CHANNEL, BUFFER> {
+impl<UART: Instance, RXPIN> Rx<UART, RXPIN, Owned> {
+    pub fn release(self) -> (UART, RXPIN) {
+        regs::<UART>().control1().modify(|_, w| w.ue().disable());
+        (
+            self.uart.expect("owned USART Rx missing USART owner"),
+            self.pin,
+        )
+    }
+}
+
+impl<UART: Instance, TXPIN, OWNER, CHANNEL: DmaChannelId, BUFFER>
+    TxDmaTransfer<UART, TXPIN, OWNER, CHANNEL, BUFFER>
+{
     pub fn is_done(&mut self) -> Result<bool, DmaTransferError> {
         self.channel
             .as_mut()
@@ -1023,8 +1662,8 @@ impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> TxDmaTransfer<UART, CHANNEL,
     pub fn wait(
         mut self,
     ) -> Result<
-        (Tx<UART>, DmaChannel<CHANNEL>, BUFFER),
-        DmaTransferFailure<Tx<UART>, DmaChannel<CHANNEL>, BUFFER>,
+        (Tx<UART, TXPIN, OWNER>, DmaChannel<CHANNEL>, BUFFER),
+        DmaTransferFailure<Tx<UART, TXPIN, OWNER>, DmaChannel<CHANNEL>, BUFFER>,
     > {
         loop {
             match self.is_done() {
@@ -1039,8 +1678,8 @@ impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> TxDmaTransfer<UART, CHANNEL,
         mut self,
         timeout: u32,
     ) -> Result<
-        (Tx<UART>, DmaChannel<CHANNEL>, BUFFER),
-        DmaTransferFailure<Tx<UART>, DmaChannel<CHANNEL>, BUFFER>,
+        (Tx<UART, TXPIN, OWNER>, DmaChannel<CHANNEL>, BUFFER),
+        DmaTransferFailure<Tx<UART, TXPIN, OWNER>, DmaChannel<CHANNEL>, BUFFER>,
     > {
         for _ in 0..timeout {
             match self.is_done() {
@@ -1052,7 +1691,7 @@ impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> TxDmaTransfer<UART, CHANNEL,
         Err(self.take_failure(DmaTransferError::Dma(DmaError::Timeout)))
     }
 
-    pub fn abort(mut self) -> (Tx<UART>, DmaChannel<CHANNEL>, BUFFER) {
+    pub fn abort(mut self) -> (Tx<UART, TXPIN, OWNER>, DmaChannel<CHANNEL>, BUFFER) {
         self.take_parts()
     }
 
@@ -1065,7 +1704,7 @@ impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> TxDmaTransfer<UART, CHANNEL,
             .modify(|_, w| w.dmat().bit(self.request_was_enabled));
     }
 
-    fn take_parts(&mut self) -> (Tx<UART>, DmaChannel<CHANNEL>, BUFFER) {
+    fn take_parts(&mut self) -> (Tx<UART, TXPIN, OWNER>, DmaChannel<CHANNEL>, BUFFER) {
         self.stop_and_restore();
         (
             self.tx.take().expect("DMA transfer USART missing"),
@@ -1077,7 +1716,7 @@ impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> TxDmaTransfer<UART, CHANNEL,
     fn take_failure(
         &mut self,
         error: DmaTransferError,
-    ) -> DmaTransferFailure<Tx<UART>, DmaChannel<CHANNEL>, BUFFER> {
+    ) -> DmaTransferFailure<Tx<UART, TXPIN, OWNER>, DmaChannel<CHANNEL>, BUFFER> {
         let (peripheral, channel, buffer) = self.take_parts();
         DmaTransferFailure {
             error,
@@ -1088,13 +1727,17 @@ impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> TxDmaTransfer<UART, CHANNEL,
     }
 }
 
-impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> Drop for TxDmaTransfer<UART, CHANNEL, BUFFER> {
+impl<UART: Instance, TXPIN, OWNER, CHANNEL: DmaChannelId, BUFFER> Drop
+    for TxDmaTransfer<UART, TXPIN, OWNER, CHANNEL, BUFFER>
+{
     fn drop(&mut self) {
         self.stop_and_restore();
     }
 }
 
-impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> RxDmaTransfer<UART, CHANNEL, BUFFER> {
+impl<UART: Instance, RXPIN, OWNER, CHANNEL: DmaChannelId, BUFFER>
+    RxDmaTransfer<UART, RXPIN, OWNER, CHANNEL, BUFFER>
+{
     pub fn is_done(&mut self) -> Result<bool, DmaTransferError> {
         self.channel
             .as_mut()
@@ -1106,8 +1749,8 @@ impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> RxDmaTransfer<UART, CHANNEL,
     pub fn wait(
         mut self,
     ) -> Result<
-        (Rx<UART>, DmaChannel<CHANNEL>, BUFFER),
-        DmaTransferFailure<Rx<UART>, DmaChannel<CHANNEL>, BUFFER>,
+        (Rx<UART, RXPIN, OWNER>, DmaChannel<CHANNEL>, BUFFER),
+        DmaTransferFailure<Rx<UART, RXPIN, OWNER>, DmaChannel<CHANNEL>, BUFFER>,
     > {
         loop {
             match self.is_done() {
@@ -1122,8 +1765,8 @@ impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> RxDmaTransfer<UART, CHANNEL,
         mut self,
         timeout: u32,
     ) -> Result<
-        (Rx<UART>, DmaChannel<CHANNEL>, BUFFER),
-        DmaTransferFailure<Rx<UART>, DmaChannel<CHANNEL>, BUFFER>,
+        (Rx<UART, RXPIN, OWNER>, DmaChannel<CHANNEL>, BUFFER),
+        DmaTransferFailure<Rx<UART, RXPIN, OWNER>, DmaChannel<CHANNEL>, BUFFER>,
     > {
         for _ in 0..timeout {
             match self.is_done() {
@@ -1135,7 +1778,7 @@ impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> RxDmaTransfer<UART, CHANNEL,
         Err(self.take_failure(DmaTransferError::Dma(DmaError::Timeout)))
     }
 
-    pub fn abort(mut self) -> (Rx<UART>, DmaChannel<CHANNEL>, BUFFER) {
+    pub fn abort(mut self) -> (Rx<UART, RXPIN, OWNER>, DmaChannel<CHANNEL>, BUFFER) {
         self.take_parts()
     }
 
@@ -1148,7 +1791,7 @@ impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> RxDmaTransfer<UART, CHANNEL,
             .modify(|_, w| w.dmar().bit(self.request_was_enabled));
     }
 
-    fn take_parts(&mut self) -> (Rx<UART>, DmaChannel<CHANNEL>, BUFFER) {
+    fn take_parts(&mut self) -> (Rx<UART, RXPIN, OWNER>, DmaChannel<CHANNEL>, BUFFER) {
         self.stop_and_restore();
         (
             self.rx.take().expect("DMA transfer USART missing"),
@@ -1160,7 +1803,7 @@ impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> RxDmaTransfer<UART, CHANNEL,
     fn take_failure(
         &mut self,
         error: DmaTransferError,
-    ) -> DmaTransferFailure<Rx<UART>, DmaChannel<CHANNEL>, BUFFER> {
+    ) -> DmaTransferFailure<Rx<UART, RXPIN, OWNER>, DmaChannel<CHANNEL>, BUFFER> {
         let (peripheral, channel, buffer) = self.take_parts();
         DmaTransferFailure {
             error,
@@ -1171,7 +1814,9 @@ impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> RxDmaTransfer<UART, CHANNEL,
     }
 }
 
-impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> Drop for RxDmaTransfer<UART, CHANNEL, BUFFER> {
+impl<UART: Instance, RXPIN, OWNER, CHANNEL: DmaChannelId, BUFFER> Drop
+    for RxDmaTransfer<UART, RXPIN, OWNER, CHANNEL, BUFFER>
+{
     fn drop(&mut self) {
         self.stop_and_restore();
     }
@@ -1245,7 +1890,7 @@ where
     }
 }
 
-impl<UART: Instance> Write for Tx<UART> {
+impl<UART: Instance, TXPIN, OWNER> Write for Tx<UART, TXPIN, OWNER> {
     fn write(&mut self, byte: u8) -> NbResult<(), Self::Error> {
         if self.word_length == WordLength::DataBits9 {
             return Err(NbError::Other(ErrorKind::Other));
@@ -1258,7 +1903,7 @@ impl<UART: Instance> Write for Tx<UART> {
     }
 }
 
-impl<UART: Instance> Write<u16> for Tx<UART> {
+impl<UART: Instance, TXPIN, OWNER> Write<u16> for Tx<UART, TXPIN, OWNER> {
     fn write(&mut self, word: u16) -> NbResult<(), Self::Error> {
         if self.word_length != WordLength::DataBits9 || word > 0x01ff {
             return Err(NbError::Other(ErrorKind::Other));
@@ -1271,7 +1916,7 @@ impl<UART: Instance> Write<u16> for Tx<UART> {
     }
 }
 
-impl<UART: Instance> fmt::Write for Tx<UART> {
+impl<UART: Instance, TXPIN, OWNER> fmt::Write for Tx<UART, TXPIN, OWNER> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for byte in s.bytes() {
             nb_block(|| self.write(byte)).map_err(|_| fmt::Error)?;
@@ -1281,7 +1926,7 @@ impl<UART: Instance> fmt::Write for Tx<UART> {
     }
 }
 
-impl<UART: Instance> Read for Rx<UART> {
+impl<UART: Instance, RXPIN, OWNER> Read for Rx<UART, RXPIN, OWNER> {
     fn read(&mut self) -> NbResult<u8, Self::Error> {
         if self.word_length == WordLength::DataBits9 {
             return Err(NbError::Other(ErrorKind::Other));
@@ -1290,7 +1935,7 @@ impl<UART: Instance> Read for Rx<UART> {
     }
 }
 
-impl<UART: Instance> Read<u16> for Rx<UART> {
+impl<UART: Instance, RXPIN, OWNER> Read<u16> for Rx<UART, RXPIN, OWNER> {
     fn read(&mut self) -> NbResult<u16, Self::Error> {
         if self.word_length != WordLength::DataBits9 {
             return Err(NbError::Other(ErrorKind::Other));
