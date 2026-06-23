@@ -3,12 +3,13 @@
 use core::fmt;
 use core::marker::PhantomData;
 
+use embedded_dma::{ReadBuffer, WriteBuffer};
 use embedded_hal_nb::nb::{Error as NbError, Result as NbResult};
 use embedded_hal_nb::serial::{ErrorKind, ErrorType, Read, Write};
 use mik32_pac::usart_0::RegisterBlock;
 use mik32_pac::{Peripherals, Usart0, Usart1};
 
-use crate::dma::{Channel as DmaChannel, Error as DmaError};
+use crate::dma::{Channel as DmaChannel, ChannelId as DmaChannelId, Error as DmaError};
 use crate::gpio::{Func2Mode, Func3Mode, Pin};
 use crate::rcc::system_clock;
 
@@ -199,6 +200,27 @@ impl From<DmaError> for DmaTransferError {
     }
 }
 
+pub struct DmaTransferFailure<PERIPHERAL, CHANNEL, BUFFER> {
+    pub error: DmaTransferError,
+    pub peripheral: PERIPHERAL,
+    pub channel: CHANNEL,
+    pub buffer: BUFFER,
+}
+
+impl<PERIPHERAL, CHANNEL, BUFFER> DmaTransferFailure<PERIPHERAL, CHANNEL, BUFFER> {
+    pub fn into_parts(self) -> (DmaTransferError, PERIPHERAL, CHANNEL, BUFFER) {
+        (self.error, self.peripheral, self.channel, self.buffer)
+    }
+}
+
+impl<PERIPHERAL, CHANNEL, BUFFER> fmt::Debug for DmaTransferFailure<PERIPHERAL, CHANNEL, BUFFER> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DmaTransferFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct InitError<UART, TXPIN, RXPIN> {
     pub uart: UART,
     pub pins: (TXPIN, RXPIN),
@@ -314,6 +336,40 @@ pub struct Tx<UART: Instance> {
 pub struct Rx<UART: Instance> {
     _uart: PhantomData<UART>,
     word_length: WordLength,
+}
+
+/// USART transmit DMA transfer.
+///
+/// The transfer owns the transmitter, DMA channel and buffer while DMA is
+/// active. This prevents the channel or buffer from being reused before the
+/// hardware is finished with them. Use [`TxDmaTransfer::wait`],
+/// [`TxDmaTransfer::wait_timeout`] or [`TxDmaTransfer::abort`] to recover the
+/// owned parts.
+///
+/// Dropping this value aborts the DMA channel and restores the USART DMA
+/// request bit to the state it had before the transfer was started.
+pub struct TxDmaTransfer<UART: Instance, CHANNEL: DmaChannelId, BUFFER> {
+    tx: Option<Tx<UART>>,
+    channel: Option<DmaChannel<CHANNEL>>,
+    buffer: Option<BUFFER>,
+    request_was_enabled: bool,
+}
+
+/// USART receive DMA transfer.
+///
+/// The transfer owns the receiver, DMA channel and buffer while DMA is active.
+/// This prevents the channel or buffer from being reused before the hardware
+/// is finished with them. Use [`RxDmaTransfer::wait`],
+/// [`RxDmaTransfer::wait_timeout`] or [`RxDmaTransfer::abort`] to recover the
+/// owned parts.
+///
+/// Dropping this value aborts the DMA channel and restores the USART DMA
+/// request bit to the state it had before the transfer was started.
+pub struct RxDmaTransfer<UART: Instance, CHANNEL: DmaChannelId, BUFFER> {
+    rx: Option<Rx<UART>>,
+    channel: Option<DmaChannel<CHANNEL>>,
+    buffer: Option<BUFFER>,
+    request_was_enabled: bool,
 }
 
 pub struct SynchronousSerial<UART, TXPIN, RXPIN, CLOCKPIN>
@@ -646,21 +702,150 @@ impl<UART: Instance> ErrorType for Tx<UART> {
 }
 
 impl<UART: Instance> Tx<UART> {
-    pub fn write_dma<const N: u8>(
+    /// Starts a non-blocking DMA write using an 8-bit transmit buffer.
+    ///
+    /// This method consumes the transmitter, DMA channel and buffer and returns
+    /// a [`TxDmaTransfer`] guard. The owned parts are returned by
+    /// [`TxDmaTransfer::wait`], [`TxDmaTransfer::wait_timeout`] or
+    /// [`TxDmaTransfer::abort`]. Dropping the guard aborts the transfer.
+    ///
+    /// The buffer is accepted through [`embedded_dma::ReadBuffer`]. For a DMA
+    /// transfer this usually means using a buffer with a stable address for the
+    /// whole transfer, most commonly a `static` buffer or reference. Do not
+    /// mutate, move or drop the buffer while the transfer guard is alive.
+    ///
+    /// DMA completion only means that the last byte has been written into the
+    /// USART transmit register. Call [`embedded_hal_nb::serial::Write::flush`]
+    /// afterwards if the last bit must have left the pin before continuing.
+    ///
+    /// Returns [`DmaTransferError::InvalidWordLength`] when the USART is
+    /// configured for 9-bit words. Use [`Tx::write_dma_9bit`] in that mode.
+    pub fn write_dma<CHANNEL: DmaChannelId, BUFFER>(
+        self,
+        mut channel: DmaChannel<CHANNEL>,
+        buffer: BUFFER,
+    ) -> Result<
+        TxDmaTransfer<UART, CHANNEL, BUFFER>,
+        DmaTransferFailure<Self, DmaChannel<CHANNEL>, BUFFER>,
+    >
+    where
+        BUFFER: ReadBuffer<Word = u8>,
+    {
+        if self.word_length == WordLength::DataBits9 {
+            return Err(DmaTransferFailure {
+                error: DmaTransferError::InvalidWordLength,
+                peripheral: self,
+                channel,
+                buffer,
+            });
+        }
+
+        let (source, length) = unsafe { buffer.read_buffer() };
+        match dma_write_start::<UART, CHANNEL>(&mut channel, source, length, 0) {
+            Ok(request_was_enabled) => Ok(TxDmaTransfer {
+                tx: Some(self),
+                channel: Some(channel),
+                buffer: Some(buffer),
+                request_was_enabled,
+            }),
+            Err(error) => Err(DmaTransferFailure {
+                error,
+                peripheral: self,
+                channel,
+                buffer,
+            }),
+        }
+    }
+
+    /// Starts a non-blocking DMA write using a 9-bit transmit buffer.
+    ///
+    /// This is the 9-bit counterpart of [`Tx::write_dma`]. Each `u16` word must
+    /// fit into 9 bits (`0..=0x01ff`); otherwise
+    /// [`DmaTransferError::WordOutOfRange`] is returned and all owned parts are
+    /// returned in [`DmaTransferFailure`].
+    ///
+    /// The same lifetime rule applies as for [`Tx::write_dma`]: the DMA buffer
+    /// must stay at a stable address and must not be mutated, moved or dropped
+    /// while the returned transfer guard is alive.
+    pub fn write_dma_9bit<CHANNEL: DmaChannelId, BUFFER>(
+        self,
+        mut channel: DmaChannel<CHANNEL>,
+        buffer: BUFFER,
+    ) -> Result<
+        TxDmaTransfer<UART, CHANNEL, BUFFER>,
+        DmaTransferFailure<Self, DmaChannel<CHANNEL>, BUFFER>,
+    >
+    where
+        BUFFER: ReadBuffer<Word = u16>,
+    {
+        if self.word_length != WordLength::DataBits9 {
+            return Err(DmaTransferFailure {
+                error: DmaTransferError::InvalidWordLength,
+                peripheral: self,
+                channel,
+                buffer,
+            });
+        }
+
+        let (source, words) = unsafe { buffer.read_buffer() };
+        let values = unsafe { core::slice::from_raw_parts(source, words) };
+        if values.iter().any(|word| *word > 0x01ff) {
+            return Err(DmaTransferFailure {
+                error: DmaTransferError::WordOutOfRange,
+                peripheral: self,
+                channel,
+                buffer,
+            });
+        }
+
+        match dma_write_start::<UART, CHANNEL>(
+            &mut channel,
+            source.cast(),
+            words.saturating_mul(2),
+            1,
+        ) {
+            Ok(request_was_enabled) => Ok(TxDmaTransfer {
+                tx: Some(self),
+                channel: Some(channel),
+                buffer: Some(buffer),
+                request_was_enabled,
+            }),
+            Err(error) => Err(DmaTransferFailure {
+                error,
+                peripheral: self,
+                channel,
+                buffer,
+            }),
+        }
+    }
+
+    /// Performs a blocking DMA write using an 8-bit transmit slice.
+    ///
+    /// This is a convenience wrapper around the non-blocking DMA machinery. It
+    /// borrows the transmitter, channel and slice until the transfer completes
+    /// or `timeout` expires.
+    ///
+    /// DMA completion only means that the last byte has been written into the
+    /// USART transmit register. Call [`embedded_hal_nb::serial::Write::flush`]
+    /// afterwards if the last bit must have left the pin before continuing.
+    pub fn blocking_write_dma<CHANNEL: DmaChannelId>(
         &mut self,
-        channel: &mut DmaChannel<N>,
+        channel: &mut DmaChannel<CHANNEL>,
         buffer: &[u8],
         timeout: u32,
     ) -> Result<(), DmaTransferError> {
         if self.word_length == WordLength::DataBits9 {
             return Err(DmaTransferError::InvalidWordLength);
         }
-        dma_write::<UART, N>(channel, buffer.as_ptr(), buffer.len(), 0, timeout)
+        dma_write::<UART, CHANNEL>(channel, buffer.as_ptr(), buffer.len(), 0, timeout)
     }
 
-    pub fn write_dma_9bit<const N: u8>(
+    /// Performs a blocking DMA write using a 9-bit transmit slice.
+    ///
+    /// Each `u16` word must fit into 9 bits (`0..=0x01ff`).
+    pub fn blocking_write_dma_9bit<CHANNEL: DmaChannelId>(
         &mut self,
-        channel: &mut DmaChannel<N>,
+        channel: &mut DmaChannel<CHANNEL>,
         buffer: &[u16],
         timeout: u32,
     ) -> Result<(), DmaTransferError> {
@@ -670,7 +855,7 @@ impl<UART: Instance> Tx<UART> {
         if buffer.iter().any(|word| *word > 0x01ff) {
             return Err(DmaTransferError::WordOutOfRange);
         }
-        dma_write::<UART, N>(
+        dma_write::<UART, CHANNEL>(
             channel,
             buffer.as_ptr().cast(),
             buffer.len().saturating_mul(2),
@@ -685,34 +870,310 @@ impl<UART: Instance> ErrorType for Rx<UART> {
 }
 
 impl<UART: Instance> Rx<UART> {
-    pub fn read_dma<const N: u8>(
+    /// Starts a non-blocking DMA read into an 8-bit receive buffer.
+    ///
+    /// This method consumes the receiver, DMA channel and buffer and returns an
+    /// [`RxDmaTransfer`] guard. The owned parts are returned by
+    /// [`RxDmaTransfer::wait`], [`RxDmaTransfer::wait_timeout`] or
+    /// [`RxDmaTransfer::abort`]. Dropping the guard aborts the transfer.
+    ///
+    /// The buffer is accepted through [`embedded_dma::WriteBuffer`]. For a DMA
+    /// transfer this usually means using a buffer with a stable address for the
+    /// whole transfer, most commonly a `static mut` buffer or another
+    /// DMA-safe owner. Do not read, move or drop the buffer while the transfer
+    /// guard is alive.
+    ///
+    /// Returns [`DmaTransferError::InvalidWordLength`] when the USART is
+    /// configured for 9-bit words. Use [`Rx::read_dma_9bit`] in that mode.
+    pub fn read_dma<CHANNEL: DmaChannelId, BUFFER>(
+        self,
+        mut channel: DmaChannel<CHANNEL>,
+        mut buffer: BUFFER,
+    ) -> Result<
+        RxDmaTransfer<UART, CHANNEL, BUFFER>,
+        DmaTransferFailure<Self, DmaChannel<CHANNEL>, BUFFER>,
+    >
+    where
+        BUFFER: WriteBuffer<Word = u8>,
+    {
+        if self.word_length == WordLength::DataBits9 {
+            return Err(DmaTransferFailure {
+                error: DmaTransferError::InvalidWordLength,
+                peripheral: self,
+                channel,
+                buffer,
+            });
+        }
+
+        let (destination, length) = unsafe { buffer.write_buffer() };
+        match dma_read_start::<UART, CHANNEL>(&mut channel, destination, length, 0) {
+            Ok(request_was_enabled) => Ok(RxDmaTransfer {
+                rx: Some(self),
+                channel: Some(channel),
+                buffer: Some(buffer),
+                request_was_enabled,
+            }),
+            Err(error) => Err(DmaTransferFailure {
+                error,
+                peripheral: self,
+                channel,
+                buffer,
+            }),
+        }
+    }
+
+    /// Starts a non-blocking DMA read into a 9-bit receive buffer.
+    ///
+    /// This is the 9-bit counterpart of [`Rx::read_dma`]. DMA writes one
+    /// received word into each `u16` slot.
+    ///
+    /// The same lifetime rule applies as for [`Rx::read_dma`]: the DMA buffer
+    /// must stay at a stable address and must not be read, moved or dropped
+    /// while the returned transfer guard is alive.
+    pub fn read_dma_9bit<CHANNEL: DmaChannelId, BUFFER>(
+        self,
+        mut channel: DmaChannel<CHANNEL>,
+        mut buffer: BUFFER,
+    ) -> Result<
+        RxDmaTransfer<UART, CHANNEL, BUFFER>,
+        DmaTransferFailure<Self, DmaChannel<CHANNEL>, BUFFER>,
+    >
+    where
+        BUFFER: WriteBuffer<Word = u16>,
+    {
+        if self.word_length != WordLength::DataBits9 {
+            return Err(DmaTransferFailure {
+                error: DmaTransferError::InvalidWordLength,
+                peripheral: self,
+                channel,
+                buffer,
+            });
+        }
+
+        let (destination, words) = unsafe { buffer.write_buffer() };
+        match dma_read_start::<UART, CHANNEL>(
+            &mut channel,
+            destination.cast(),
+            words.saturating_mul(2),
+            1,
+        ) {
+            Ok(request_was_enabled) => Ok(RxDmaTransfer {
+                rx: Some(self),
+                channel: Some(channel),
+                buffer: Some(buffer),
+                request_was_enabled,
+            }),
+            Err(error) => Err(DmaTransferFailure {
+                error,
+                peripheral: self,
+                channel,
+                buffer,
+            }),
+        }
+    }
+
+    /// Performs a blocking DMA read into an 8-bit receive slice.
+    ///
+    /// This is a convenience wrapper around the non-blocking DMA machinery. It
+    /// borrows the receiver, channel and slice until the transfer completes or
+    /// `timeout` expires.
+    pub fn blocking_read_dma<CHANNEL: DmaChannelId>(
         &mut self,
-        channel: &mut DmaChannel<N>,
+        channel: &mut DmaChannel<CHANNEL>,
         buffer: &mut [u8],
         timeout: u32,
     ) -> Result<(), DmaTransferError> {
         if self.word_length == WordLength::DataBits9 {
             return Err(DmaTransferError::InvalidWordLength);
         }
-        dma_read::<UART, N>(channel, buffer.as_mut_ptr(), buffer.len(), 0, timeout)
+        dma_read::<UART, CHANNEL>(channel, buffer.as_mut_ptr(), buffer.len(), 0, timeout)
     }
 
-    pub fn read_dma_9bit<const N: u8>(
+    /// Performs a blocking DMA read into a 9-bit receive slice.
+    ///
+    /// DMA writes one received word into each `u16` slot.
+    pub fn blocking_read_dma_9bit<CHANNEL: DmaChannelId>(
         &mut self,
-        channel: &mut DmaChannel<N>,
+        channel: &mut DmaChannel<CHANNEL>,
         buffer: &mut [u16],
         timeout: u32,
     ) -> Result<(), DmaTransferError> {
         if self.word_length != WordLength::DataBits9 {
             return Err(DmaTransferError::InvalidWordLength);
         }
-        dma_read::<UART, N>(
+        dma_read::<UART, CHANNEL>(
             channel,
             buffer.as_mut_ptr().cast(),
             buffer.len().saturating_mul(2),
             1,
             timeout,
         )
+    }
+}
+
+impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> TxDmaTransfer<UART, CHANNEL, BUFFER> {
+    pub fn is_done(&mut self) -> Result<bool, DmaTransferError> {
+        self.channel
+            .as_mut()
+            .expect("DMA transfer channel missing")
+            .poll()
+            .map_err(Into::into)
+    }
+
+    pub fn wait(
+        mut self,
+    ) -> Result<
+        (Tx<UART>, DmaChannel<CHANNEL>, BUFFER),
+        DmaTransferFailure<Tx<UART>, DmaChannel<CHANNEL>, BUFFER>,
+    > {
+        loop {
+            match self.is_done() {
+                Ok(true) => return Ok(self.take_parts()),
+                Ok(false) => core::hint::spin_loop(),
+                Err(error) => return Err(self.take_failure(error)),
+            }
+        }
+    }
+
+    pub fn wait_timeout(
+        mut self,
+        timeout: u32,
+    ) -> Result<
+        (Tx<UART>, DmaChannel<CHANNEL>, BUFFER),
+        DmaTransferFailure<Tx<UART>, DmaChannel<CHANNEL>, BUFFER>,
+    > {
+        for _ in 0..timeout {
+            match self.is_done() {
+                Ok(true) => return Ok(self.take_parts()),
+                Ok(false) => core::hint::spin_loop(),
+                Err(error) => return Err(self.take_failure(error)),
+            }
+        }
+        Err(self.take_failure(DmaTransferError::Dma(DmaError::Timeout)))
+    }
+
+    pub fn abort(mut self) -> (Tx<UART>, DmaChannel<CHANNEL>, BUFFER) {
+        self.take_parts()
+    }
+
+    fn stop_and_restore(&mut self) {
+        if let Some(channel) = self.channel.as_mut() {
+            channel.stop();
+        }
+        regs::<UART>()
+            .control3()
+            .modify(|_, w| w.dmat().bit(self.request_was_enabled));
+    }
+
+    fn take_parts(&mut self) -> (Tx<UART>, DmaChannel<CHANNEL>, BUFFER) {
+        self.stop_and_restore();
+        (
+            self.tx.take().expect("DMA transfer USART missing"),
+            self.channel.take().expect("DMA transfer channel missing"),
+            self.buffer.take().expect("DMA transfer buffer missing"),
+        )
+    }
+
+    fn take_failure(
+        &mut self,
+        error: DmaTransferError,
+    ) -> DmaTransferFailure<Tx<UART>, DmaChannel<CHANNEL>, BUFFER> {
+        let (peripheral, channel, buffer) = self.take_parts();
+        DmaTransferFailure {
+            error,
+            peripheral,
+            channel,
+            buffer,
+        }
+    }
+}
+
+impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> Drop for TxDmaTransfer<UART, CHANNEL, BUFFER> {
+    fn drop(&mut self) {
+        self.stop_and_restore();
+    }
+}
+
+impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> RxDmaTransfer<UART, CHANNEL, BUFFER> {
+    pub fn is_done(&mut self) -> Result<bool, DmaTransferError> {
+        self.channel
+            .as_mut()
+            .expect("DMA transfer channel missing")
+            .poll()
+            .map_err(Into::into)
+    }
+
+    pub fn wait(
+        mut self,
+    ) -> Result<
+        (Rx<UART>, DmaChannel<CHANNEL>, BUFFER),
+        DmaTransferFailure<Rx<UART>, DmaChannel<CHANNEL>, BUFFER>,
+    > {
+        loop {
+            match self.is_done() {
+                Ok(true) => return Ok(self.take_parts()),
+                Ok(false) => core::hint::spin_loop(),
+                Err(error) => return Err(self.take_failure(error)),
+            }
+        }
+    }
+
+    pub fn wait_timeout(
+        mut self,
+        timeout: u32,
+    ) -> Result<
+        (Rx<UART>, DmaChannel<CHANNEL>, BUFFER),
+        DmaTransferFailure<Rx<UART>, DmaChannel<CHANNEL>, BUFFER>,
+    > {
+        for _ in 0..timeout {
+            match self.is_done() {
+                Ok(true) => return Ok(self.take_parts()),
+                Ok(false) => core::hint::spin_loop(),
+                Err(error) => return Err(self.take_failure(error)),
+            }
+        }
+        Err(self.take_failure(DmaTransferError::Dma(DmaError::Timeout)))
+    }
+
+    pub fn abort(mut self) -> (Rx<UART>, DmaChannel<CHANNEL>, BUFFER) {
+        self.take_parts()
+    }
+
+    fn stop_and_restore(&mut self) {
+        if let Some(channel) = self.channel.as_mut() {
+            channel.stop();
+        }
+        regs::<UART>()
+            .control3()
+            .modify(|_, w| w.dmar().bit(self.request_was_enabled));
+    }
+
+    fn take_parts(&mut self) -> (Rx<UART>, DmaChannel<CHANNEL>, BUFFER) {
+        self.stop_and_restore();
+        (
+            self.rx.take().expect("DMA transfer USART missing"),
+            self.channel.take().expect("DMA transfer channel missing"),
+            self.buffer.take().expect("DMA transfer buffer missing"),
+        )
+    }
+
+    fn take_failure(
+        &mut self,
+        error: DmaTransferError,
+    ) -> DmaTransferFailure<Rx<UART>, DmaChannel<CHANNEL>, BUFFER> {
+        let (peripheral, channel, buffer) = self.take_parts();
+        DmaTransferFailure {
+            error,
+            peripheral,
+            channel,
+            buffer,
+        }
+    }
+}
+
+impl<UART: Instance, CHANNEL: DmaChannelId, BUFFER> Drop for RxDmaTransfer<UART, CHANNEL, BUFFER> {
+    fn drop(&mut self) {
+        self.stop_and_restore();
     }
 }
 
@@ -838,8 +1299,54 @@ impl<UART: Instance> Read<u16> for Rx<UART> {
     }
 }
 
-fn dma_write<UART: Instance, const N: u8>(
-    channel: &mut DmaChannel<N>,
+fn dma_write_start<UART: Instance, CHANNEL: DmaChannelId>(
+    channel: &mut DmaChannel<CHANNEL>,
+    source: *const u8,
+    length: usize,
+    size: u32,
+) -> Result<bool, DmaTransferError> {
+    let regs = regs::<UART>();
+    let destination = core::ptr::from_ref(regs.txdata()).cast_mut().cast::<u8>();
+    let request_was_enabled = regs.control3().read().dmat().bit_is_set();
+    regs.control3().modify(|_, w| w.dmat().enable());
+
+    if let Err(error) = channel.start(source, destination, length, dma_tx_config::<UART>(size)) {
+        regs.control3()
+            .modify(|_, w| w.dmat().bit(request_was_enabled));
+        return Err(error.into());
+    }
+    Ok(request_was_enabled)
+}
+
+fn dma_read_start<UART: Instance, CHANNEL: DmaChannelId>(
+    channel: &mut DmaChannel<CHANNEL>,
+    destination: *mut u8,
+    length: usize,
+    size: u32,
+) -> Result<bool, DmaTransferError> {
+    let regs = regs::<UART>();
+    let source = core::ptr::from_ref(regs.rxdata()).cast::<u8>();
+    let request_was_enabled = regs.control3().read().dmar().bit_is_set();
+    regs.control3().modify(|_, w| w.dmar().enable());
+
+    if let Err(error) = channel.start(source, destination, length, dma_rx_config::<UART>(size)) {
+        regs.control3()
+            .modify(|_, w| w.dmar().bit(request_was_enabled));
+        return Err(error.into());
+    }
+    Ok(request_was_enabled)
+}
+
+fn dma_tx_config<UART: Instance>(size: u32) -> u32 {
+    (1 << 3) | (1 << 5) | (size << 7) | (size << 9) | (UART::DMA_REQUEST << 21) | (1 << 26)
+}
+
+fn dma_rx_config<UART: Instance>(size: u32) -> u32 {
+    (1 << 4) | (1 << 6) | (size << 7) | (size << 9) | (UART::DMA_REQUEST << 17) | (1 << 25)
+}
+
+fn dma_write<UART: Instance, CHANNEL: DmaChannelId>(
+    channel: &mut DmaChannel<CHANNEL>,
     source: *const u8,
     length: usize,
     size: u32,
@@ -847,8 +1354,7 @@ fn dma_write<UART: Instance, const N: u8>(
 ) -> Result<(), DmaTransferError> {
     let regs = regs::<UART>();
     let destination = core::ptr::from_ref(regs.txdata()).cast_mut().cast::<u8>();
-    let config =
-        (1 << 3) | (1 << 5) | (size << 7) | (size << 9) | (UART::DMA_REQUEST << 21) | (1 << 26);
+    let config = dma_tx_config::<UART>(size);
 
     let request_was_enabled = regs.control3().read().dmat().bit_is_set();
     regs.control3().modify(|_, w| w.dmat().enable());
@@ -858,8 +1364,8 @@ fn dma_write<UART: Instance, const N: u8>(
     result.map_err(Into::into)
 }
 
-fn dma_read<UART: Instance, const N: u8>(
-    channel: &mut DmaChannel<N>,
+fn dma_read<UART: Instance, CHANNEL: DmaChannelId>(
+    channel: &mut DmaChannel<CHANNEL>,
     destination: *mut u8,
     length: usize,
     size: u32,
@@ -867,8 +1373,7 @@ fn dma_read<UART: Instance, const N: u8>(
 ) -> Result<(), DmaTransferError> {
     let regs = regs::<UART>();
     let source = core::ptr::from_ref(regs.rxdata()).cast::<u8>();
-    let config =
-        (1 << 4) | (1 << 6) | (size << 7) | (size << 9) | (UART::DMA_REQUEST << 17) | (1 << 25);
+    let config = dma_rx_config::<UART>(size);
 
     let request_was_enabled = regs.control3().read().dmar().bit_is_set();
     regs.control3().modify(|_, w| w.dmar().enable());
