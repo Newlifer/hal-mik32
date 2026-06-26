@@ -156,7 +156,7 @@ impl TSENS {
 
         // Подбор делителя для заданной частоты термосенсора
         let real_clock = Self::get_real_clocks(&result.config, clocks);
-        let divider = Self::calc_divider(real_clock, &result.config, clocks)?;
+        let divider = Self::calc_divider(real_clock, &result.config)?;
 
         // Установка источника тактирования термосенсора
         result
@@ -353,7 +353,7 @@ impl TSENS {
     /// # Returns
     ///
     /// - `Result<u32, Error>` - вычисленный делитель или ошибка, если частота вне допустимого диапазона
-    fn calc_divider(real_clock: u32, config: &Config, clocks: &Clocks) -> Result<u32, Error> {
+    fn calc_divider(real_clock: u32, config: &Config) -> Result<u32, Error> {
         if config.frequency == 0 || config.frequency > 100_000 {
             return Err(Error::FrequencyOutOfRange);
         }

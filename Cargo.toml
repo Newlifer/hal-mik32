@@ -20,6 +20,6 @@ heapless = "0.9.2"
 mik32-pac = "1.1.0"
 panic-halt = "1.0.0"
 riscv = { version = "0.16.1" }
-fugit = "0.3.9"
-embedded-timers = "0.3.0"
-critical-section = { version = "1.2.0", features = ["restore-state-bool"] }
+fugit = "0.4.0"
+embedded-timers = "0.4.0"
+critical-section = "1.2.0"

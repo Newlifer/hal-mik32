@@ -1,7 +1,7 @@
 //! Direct memory access controller.
 
 use core::marker::PhantomData;
-use core::sync::atomic::{fence, Ordering};
+use core::sync::atomic::{Ordering, fence};
 
 use mik32_pac::{Dma as DmaPeripheral, Peripherals};
 
