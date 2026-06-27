@@ -25,7 +25,7 @@ The release path is based on incremental HAL support for MIK32 peripherals, with
 
 These steps must be implemented in this order because they are needed for the minimal bring-up.
 
-- [ ] RCC config
+- [x] RCC config
 - [ ] GPIO
 - [ ] USART
 

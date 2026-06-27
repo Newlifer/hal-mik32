@@ -23,6 +23,10 @@ pub const OSC32M_FREQ: Hertz = Hertz(32_000_000);
 pub const LSI32K_FREQ: Hertz = Hertz(32_768);
 pub const OSC32K_FREQ: Hertz = Hertz(32_768);
 
+const CLOCKSWITCH_TIMEOUT_VALUE: u32 = 500_000;
+const SWITCH_SETTLE_CYCLES: u32 = 100;
+const LSI32K_CALIBRATION_MAX: u8 = 15;
+
 /// Рассчитанные частоты после применения RCC-конфигурации.
 ///
 /// Значения в этой структуре используются периферийными драйверами для
@@ -118,6 +122,19 @@ pub enum ClockSource {
     Osc32k,
 }
 
+/// Этап переключения тактирования, на котором источник не был обнаружен.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClockSwitchStage {
+    /// Выбор опорного 32 кГц источника для монитора частоты.
+    FreqMonitorRef,
+    /// Выбор приоритетного системного источника.
+    SystemClock,
+    /// Выбор источника RTC в backup-домене.
+    RtcClock,
+    /// Выбор RTC-источника для системного таймера ядра.
+    CpuRtcClock,
+}
+
 /// Ошибки RCC-конфигурации.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -126,6 +143,21 @@ pub enum Error {
     /// Для автоматического или явного выбора 32 кГц источника не включен ни
     /// один 32 кГц генератор.
     No32kClockEnabled,
+    /// Источник включен в конфигурации, но монитор частоты не обнаружил его за
+    /// время ожидания.
+    ClockNotReady {
+        /// Этап настройки, на котором произошел таймаут.
+        stage: ClockSwitchStage,
+        /// Источник, который ожидался в `PM.FREQ_STATUS`.
+        source: ClockSource,
+    },
+    /// Значение калибровки не помещается в аппаратное поле регистра.
+    InvalidCalibration {
+        /// Генератор, калибровочное значение которого некорректно.
+        source: ClockSource,
+        /// Переданное значение.
+        value: u8,
+    },
 }
 
 /// Конфигурация монитора частоты и выбора системного источника.
@@ -216,6 +248,7 @@ impl RCC {
 
         let wu = unsafe { WakeUp::steal() };
         let pm = unsafe { Pm::steal() };
+        let mut first_error = None;
 
         // Включаем генераторы перед переключением mux'ов: это уменьшает шанс
         // оставить систему без активного источника тактирования.
@@ -233,29 +266,79 @@ impl RCC {
         wu.clocks_bu()
             .modify(|_, w| unsafe { w.adj_lsi32k().bits(config.lsi32k_calibration_value) });
 
-        // Настраиваем опорный 32 кГц источник монитора частоты.
-        wu.clocks_sys()
-            .modify(|_, w| match config.freq_monitor.force32k_clk {
-                Force32kClk::Automatic => w.force_32k_clk().automatic(),
-                Force32kClk::Lsi32k => w.force_32k_clk().lsi32k(),
-                Force32kClk::Osc32k => w.force_32k_clk().osc32k(),
-            });
+        // Настраиваем опорный 32 кГц источник монитора частоты. Как и
+        // reference HAL, для явного выбора сначала ждем бит в PM.FREQ_STATUS и
+        // только потом пишем mux: так не назначается источник, который железо
+        // еще не видит.
+        match config.freq_monitor.force32k_clk {
+            Force32kClk::Automatic => {
+                wu.clocks_sys().modify(|_, w| w.force_32k_clk().automatic());
+            }
+            Force32kClk::Lsi32k => {
+                if Self::wait_freq_status(&pm, ClockSource::Lsi32k) {
+                    wu.clocks_sys().modify(|_, w| w.force_32k_clk().lsi32k());
+                    Self::switch_settle_delay();
+                } else {
+                    Self::record_error(
+                        &mut first_error,
+                        Error::ClockNotReady {
+                            stage: ClockSwitchStage::FreqMonitorRef,
+                            source: ClockSource::Lsi32k,
+                        },
+                    );
+                }
+            }
+            Force32kClk::Osc32k => {
+                if Self::wait_freq_status(&pm, ClockSource::Osc32k) {
+                    wu.clocks_sys().modify(|_, w| w.force_32k_clk().osc32k());
+                    Self::switch_settle_delay();
+                } else {
+                    Self::record_error(
+                        &mut first_error,
+                        Error::ClockNotReady {
+                            stage: ClockSwitchStage::FreqMonitorRef,
+                            source: ClockSource::Osc32k,
+                        },
+                    );
+                }
+            }
+        }
 
-        // `FORCE_MUX` управляет автоматическим переключением при потере
-        // выбранного источника.
-        pm.ahb_mux()
-            .modify(|_, w| match config.freq_monitor.force_osc_sys {
-                ForceMux::Unfixed => w.force_mux().unfixed(),
-                ForceMux::Fixed => w.force_mux().fixed(),
-            });
+        // Выбор системного источника. При таймауте C HAL все равно делает
+        // выбранный источник приоритетным, но принудительно оставляет
+        // автоматическое переключение включенным (`UNFIXED`), чтобы железо
+        // могло уйти на живой fallback-источник.
+        let system_source = Self::source_for_ahb(config.freq_monitor.sys);
+        if Self::wait_freq_status(&pm, system_source) {
+            pm.ahb_mux().modify(|_, w| {
+                let w = match config.freq_monitor.sys {
+                    AhbClkMux::Osc32m => w.ahb_clk_mux().osc32m(),
+                    AhbClkMux::Hsi32m => w.ahb_clk_mux().hsi32m(),
+                    AhbClkMux::Osc32k => w.ahb_clk_mux().osc32k(),
+                    AhbClkMux::Lsi32k => w.ahb_clk_mux().lsi32k(),
+                };
 
-        // Выбор системного источника и делителей шин.
-        pm.ahb_mux().modify(|_, w| match config.freq_monitor.sys {
-            AhbClkMux::Osc32m => w.ahb_clk_mux().osc32m(),
-            AhbClkMux::Hsi32m => w.ahb_clk_mux().hsi32m(),
-            AhbClkMux::Osc32k => w.ahb_clk_mux().osc32k(),
-            AhbClkMux::Lsi32k => w.ahb_clk_mux().lsi32k(),
-        });
+                match config.freq_monitor.force_osc_sys {
+                    ForceMux::Unfixed => w.force_mux().unfixed(),
+                    ForceMux::Fixed => w.force_mux().fixed(),
+                }
+            });
+            Self::switch_settle_delay();
+        } else {
+            pm.ahb_mux().modify(|_, w| match config.freq_monitor.sys {
+                AhbClkMux::Osc32m => w.ahb_clk_mux().osc32m().force_mux().unfixed(),
+                AhbClkMux::Hsi32m => w.ahb_clk_mux().hsi32m().force_mux().unfixed(),
+                AhbClkMux::Osc32k => w.ahb_clk_mux().osc32k().force_mux().unfixed(),
+                AhbClkMux::Lsi32k => w.ahb_clk_mux().lsi32k().force_mux().unfixed(),
+            });
+            Self::record_error(
+                &mut first_error,
+                Error::ClockNotReady {
+                    stage: ClockSwitchStage::SystemClock,
+                    source: system_source,
+                },
+            );
+        }
 
         pm.div_ahb()
             .modify(|_, w| unsafe { w.bits(config.ahb_div as u32) });
@@ -267,18 +350,62 @@ impl RCC {
             .modify(|_, w| unsafe { w.bits(config.apb_p_div as u32) });
 
         // RTC в backup-домене и RTC-источник для системного таймера ядра
-        // настраиваются отдельными mux'ами.
-        wu.clocks_bu().modify(|_, w| match config.rtcclk {
-            RtcClkMux::Automatic => w.rtc_clk_mux().automatic(),
-            RtcClkMux::Lsi32k => w.rtc_clk_mux().lsi32k(),
-            RtcClkMux::Osc32k => w.rtc_clk_mux().osc32k(),
-        });
-        wu.rtc_control().reset();
+        // настраиваются отдельными mux'ами. Для явного RTC mux reference HAL
+        // ждет детектирования источника, пишет mux и делает импульс сброса RTC.
+        // `Reg::reset()` здесь не подходит: PAC сбрасывает регистр в 0, а само
+        // железо запускает сброс RTC именно записью 1.
+        match config.rtcclk {
+            RtcClkMux::Automatic => {
+                wu.clocks_bu().modify(|_, w| w.rtc_clk_mux().automatic());
+            }
+            RtcClkMux::Lsi32k => {
+                if Self::wait_freq_status(&pm, ClockSource::Lsi32k) {
+                    wu.clocks_bu().modify(|_, w| w.rtc_clk_mux().lsi32k());
+                    Self::pulse_rtc_reset(&wu);
+                    Self::switch_settle_delay();
+                } else {
+                    Self::record_error(
+                        &mut first_error,
+                        Error::ClockNotReady {
+                            stage: ClockSwitchStage::RtcClock,
+                            source: ClockSource::Lsi32k,
+                        },
+                    );
+                }
+            }
+            RtcClkMux::Osc32k => {
+                if Self::wait_freq_status(&pm, ClockSource::Osc32k) {
+                    wu.clocks_bu().modify(|_, w| w.rtc_clk_mux().osc32k());
+                    Self::pulse_rtc_reset(&wu);
+                    Self::switch_settle_delay();
+                } else {
+                    Self::record_error(
+                        &mut first_error,
+                        Error::ClockNotReady {
+                            stage: ClockSwitchStage::RtcClock,
+                            source: ClockSource::Osc32k,
+                        },
+                    );
+                }
+            }
+        }
 
-        pm.cpu_rtc_clk_mux().modify(|_, w| match config.rtccpuclk {
-            CpuRtcClkMux::Osc32k => w.cpu_rtc_clk_mux().osc32k(),
-            CpuRtcClkMux::Lsi32k => w.cpu_rtc_clk_mux().lsi32k(),
-        });
+        let cpu_rtc_source = Self::source_for_cpu_rtc(config.rtccpuclk);
+        if Self::wait_freq_status(&pm, cpu_rtc_source) {
+            pm.cpu_rtc_clk_mux().modify(|_, w| match config.rtccpuclk {
+                CpuRtcClkMux::Osc32k => w.cpu_rtc_clk_mux().osc32k(),
+                CpuRtcClkMux::Lsi32k => w.cpu_rtc_clk_mux().lsi32k(),
+            });
+            Self::switch_settle_delay();
+        } else {
+            Self::record_error(
+                &mut first_error,
+                Error::ClockNotReady {
+                    stage: ClockSwitchStage::CpuRtcClock,
+                    source: cpu_rtc_source,
+                },
+            );
+        }
 
         // После переключения можно выключить генераторы, которые не нужны
         // пользователю и не участвуют в выбранной конфигурации.
@@ -298,7 +425,11 @@ impl RCC {
             wu.clocks_bu().modify(|_, w| w.lsi32k_en().disable());
         }
 
-        Ok(Self::clocks(config))
+        if let Some(error) = first_error {
+            Err(error)
+        } else {
+            Ok(Self::clocks(config))
+        }
     }
 
     /// Рассчитывает дерево частот из RCC-конфигурации без записи регистров.
@@ -313,6 +444,13 @@ impl RCC {
 
     /// Проверяет, что выбранные источники не будут выключены конфигурацией.
     fn validate(config: &RCC) -> Result<(), Error> {
+        if config.lsi32k_calibration_value > LSI32K_CALIBRATION_MAX {
+            return Err(Error::InvalidCalibration {
+                source: ClockSource::Lsi32k,
+                value: config.lsi32k_calibration_value,
+            });
+        }
+
         Self::ensure_enabled(config, Self::source_for_ahb(config.freq_monitor.sys))?;
 
         match config.freq_monitor.force32k_clk {
@@ -364,6 +502,51 @@ impl RCC {
             AhbClkMux::Hsi32m => ClockSource::Hsi32m,
             AhbClkMux::Osc32k => ClockSource::Osc32k,
             AhbClkMux::Lsi32k => ClockSource::Lsi32k,
+        }
+    }
+
+    fn source_for_cpu_rtc(source: CpuRtcClkMux) -> ClockSource {
+        match source {
+            CpuRtcClkMux::Osc32k => ClockSource::Osc32k,
+            CpuRtcClkMux::Lsi32k => ClockSource::Lsi32k,
+        }
+    }
+
+    fn wait_freq_status(pm: &Pm, source: ClockSource) -> bool {
+        for _ in 0..CLOCKSWITCH_TIMEOUT_VALUE {
+            if Self::freq_status_ready(pm, source) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn freq_status_ready(pm: &Pm, source: ClockSource) -> bool {
+        let status = pm.freq_status().read();
+
+        match source {
+            ClockSource::Hsi32m => status.mask_hsi32m().bit_is_set(),
+            ClockSource::Osc32m => status.mask_osc32m().bit_is_set(),
+            ClockSource::Lsi32k => status.mask_lsi32k().bit_is_set(),
+            ClockSource::Osc32k => status.mask_osc32k().bit_is_set(),
+        }
+    }
+
+    fn pulse_rtc_reset(wu: &WakeUp) {
+        wu.rtc_control().write(|w| unsafe { w.bits(1) });
+        wu.rtc_control().write(|w| unsafe { w.bits(0) });
+    }
+
+    fn switch_settle_delay() {
+        for _ in 0..SWITCH_SETTLE_CYCLES {
+            core::hint::spin_loop();
+        }
+    }
+
+    fn record_error(slot: &mut Option<Error>, error: Error) {
+        if slot.is_none() {
+            *slot = Some(error);
         }
     }
 
