@@ -13,8 +13,8 @@ const TSENS_OPTIMAL_FREQUENCY: u32 = 40000;
 ///
 /// # Variants
 ///
-/// - `SycClock = 0x0` - TODO:
-/// - `HLCL = 0x1` - TODO:
+/// - `SycClock = 0x0` - Системная частота до делителя AHB
+/// - `HLCL = 0x1` - Частота AHB после делителя
 /// - `OSC32M = 0x2` - внешний осциллятор 32МГц
 /// - `HSI32M = 0x3` - внутренний осциллятор 32МГц
 /// - `OSC32K = 0x4` - внешний осциллятор 32кГц
@@ -393,8 +393,8 @@ impl TSENS {
     /// - `u32` - реальная частота тактирования для TSENS в герцах
     fn get_real_clocks(config: &Config, clocks: &Clocks) -> u32 {
         match config.source {
-            ClockSource::SycClock => clocks.ahbclk().0,
-            ClockSource::HLCL => clocks.ahbclk().0 / (clocks.ahb_div_clk() + 1),
+            ClockSource::SycClock => clocks.sysclk().0,
+            ClockSource::HLCL => clocks.ahbclk().0,
             ClockSource::OSC32M => OSC32M_FREQ.0,
             ClockSource::HSI32M => HSI32M_FREQ.0,
             ClockSource::OSC32K => OSC32K_FREQ.0,

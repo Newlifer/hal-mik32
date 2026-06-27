@@ -16,13 +16,13 @@ pub extern "C" fn main() -> ! {
     let peripherals = Peripherals::take().unwrap();
 
     let rcc_config = RCC::default();
-    RCC::init(&rcc_config);
+    let clocks = RCC::init(&rcc_config).unwrap();
 
     let sensor_config = Config::default()
         .clock_from_source(ClockSource::HSI32M)
         .with_frequency(SENSOR_CLOCK_HZ);
 
-    let mut sensor = TSENS::new(peripherals.tsens, &rcc_config.clocks, sensor_config).unwrap();
+    let mut sensor = TSENS::new(peripherals.tsens, &clocks, sensor_config).unwrap();
 
     let mut current_temperature_c = sensor.single_measurement(Some(STARTUP_TIMEOUT)).unwrap();
     let mut min_temperature_c = current_temperature_c;

@@ -15,7 +15,7 @@ pub extern "C" fn main() -> ! {
     let p = Peripherals::take().unwrap();
 
     let rcc_config = RCC::default();
-    RCC::init(&rcc_config);
+    RCC::init(&rcc_config).unwrap();
 
     p.pm.clk_apb_p_set().modify(|_, w| w.gpio_0().enable());
     p.pm.clk_apb_m_set()

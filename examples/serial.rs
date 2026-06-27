@@ -16,7 +16,7 @@ pub extern "C" fn main() -> ! {
     let peripherals = Peripherals::take().unwrap();
 
     let rcc_config = RCC::default();
-    RCC::init(&rcc_config);
+    RCC::init(&rcc_config).unwrap();
 
     peripherals
         .pm
