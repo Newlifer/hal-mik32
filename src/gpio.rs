@@ -1,9 +1,19 @@
 //! GPIO
+use core::cell::Cell;
 use core::convert::Infallible;
 use core::marker::PhantomData;
+use critical_section::Mutex;
 use embedded_hal::digital::{ErrorType, InputPin, OutputPin, StatefulOutputPin};
 
 use mik32_pac::Peripherals;
+
+const GPIO_IRQ_LINE_SHIFT: u32 = 4;
+const GPIO_IRQ_LINE_MUX_MASK: u32 = 0b1111;
+const GPIO_MODE_BIT_LEVEL: u32 = 1 << 0;
+const GPIO_MODE_BIT_EDGE: u32 = 1 << 1;
+const GPIO_MODE_BIT_ANY_EDGE: u32 = 1 << 2;
+
+static CURRENT_IRQ_LINE_MUX: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
 
 /// Floating input (type state)
 pub struct Floating;
@@ -37,6 +47,282 @@ impl DriveStrength {
     const fn bits(self) -> u32 {
         self as u32
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum InterruptLine {
+    Line0 = 0,
+    Line1 = 1,
+    Line2 = 2,
+    Line3 = 3,
+    Line4 = 4,
+    Line5 = 5,
+    Line6 = 6,
+    Line7 = 7,
+}
+
+impl InterruptLine {
+    #[inline(always)]
+    const fn index(self) -> u32 {
+        self as u32
+    }
+
+    #[inline(always)]
+    const fn mask(self) -> u32 {
+        1u32 << self.index()
+    }
+
+    #[inline(always)]
+    const fn mux_shift(self) -> u32 {
+        GPIO_IRQ_LINE_SHIFT * self.index()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum InterruptMode {
+    Low = 0,
+    High = GPIO_MODE_BIT_LEVEL as u8,
+    Falling = GPIO_MODE_BIT_EDGE as u8,
+    Rising = (GPIO_MODE_BIT_LEVEL | GPIO_MODE_BIT_EDGE) as u8,
+    Change = (GPIO_MODE_BIT_EDGE | GPIO_MODE_BIT_ANY_EDGE) as u8,
+}
+
+impl InterruptMode {
+    #[inline(always)]
+    const fn bits(self) -> u32 {
+        self as u32
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LineConfig {
+    Line0Port0_0 = 0 | (0 << GPIO_IRQ_LINE_SHIFT),
+    Line0Port0_8 = 1 | (0 << GPIO_IRQ_LINE_SHIFT),
+    Line0Port1_0 = 2 | (0 << GPIO_IRQ_LINE_SHIFT),
+    Line0Port1_8 = 3 | (0 << GPIO_IRQ_LINE_SHIFT),
+    Line0Port2_0 = 4 | (0 << GPIO_IRQ_LINE_SHIFT),
+    Line0Port0_4 = 5 | (0 << GPIO_IRQ_LINE_SHIFT),
+    Line0Port0_12 = 6 | (0 << GPIO_IRQ_LINE_SHIFT),
+    Line0Port1_4 = 7 | (0 << GPIO_IRQ_LINE_SHIFT),
+    Line0Port1_12 = 8 | (0 << GPIO_IRQ_LINE_SHIFT),
+    Line0Port2_4 = 9 | (0 << GPIO_IRQ_LINE_SHIFT),
+
+    Line1Port0_1 = 0 | (1 << GPIO_IRQ_LINE_SHIFT),
+    Line1Port0_9 = 1 | (1 << GPIO_IRQ_LINE_SHIFT),
+    Line1Port1_1 = 2 | (1 << GPIO_IRQ_LINE_SHIFT),
+    Line1Port1_9 = 3 | (1 << GPIO_IRQ_LINE_SHIFT),
+    Line1Port2_1 = 4 | (1 << GPIO_IRQ_LINE_SHIFT),
+    Line1Port0_5 = 5 | (1 << GPIO_IRQ_LINE_SHIFT),
+    Line1Port0_13 = 6 | (1 << GPIO_IRQ_LINE_SHIFT),
+    Line1Port1_5 = 7 | (1 << GPIO_IRQ_LINE_SHIFT),
+    Line1Port1_13 = 8 | (1 << GPIO_IRQ_LINE_SHIFT),
+    Line1Port2_5 = 9 | (1 << GPIO_IRQ_LINE_SHIFT),
+
+    Line2Port0_2 = 0 | (2 << GPIO_IRQ_LINE_SHIFT),
+    Line2Port0_10 = 1 | (2 << GPIO_IRQ_LINE_SHIFT),
+    Line2Port1_2 = 2 | (2 << GPIO_IRQ_LINE_SHIFT),
+    Line2Port1_10 = 3 | (2 << GPIO_IRQ_LINE_SHIFT),
+    Line2Port2_2 = 4 | (2 << GPIO_IRQ_LINE_SHIFT),
+    Line2Port0_6 = 5 | (2 << GPIO_IRQ_LINE_SHIFT),
+    Line2Port0_14 = 6 | (2 << GPIO_IRQ_LINE_SHIFT),
+    Line2Port1_6 = 7 | (2 << GPIO_IRQ_LINE_SHIFT),
+    Line2Port1_14 = 8 | (2 << GPIO_IRQ_LINE_SHIFT),
+    Line2Port2_6 = 9 | (2 << GPIO_IRQ_LINE_SHIFT),
+
+    Line3Port0_3 = 0 | (3 << GPIO_IRQ_LINE_SHIFT),
+    Line3Port0_11 = 1 | (3 << GPIO_IRQ_LINE_SHIFT),
+    Line3Port1_3 = 2 | (3 << GPIO_IRQ_LINE_SHIFT),
+    Line3Port1_11 = 3 | (3 << GPIO_IRQ_LINE_SHIFT),
+    Line3Port2_3 = 4 | (3 << GPIO_IRQ_LINE_SHIFT),
+    Line3Port0_7 = 5 | (3 << GPIO_IRQ_LINE_SHIFT),
+    Line3Port0_15 = 6 | (3 << GPIO_IRQ_LINE_SHIFT),
+    Line3Port1_7 = 7 | (3 << GPIO_IRQ_LINE_SHIFT),
+    Line3Port1_15 = 8 | (3 << GPIO_IRQ_LINE_SHIFT),
+    Line3Port2_7 = 9 | (3 << GPIO_IRQ_LINE_SHIFT),
+
+    Line4Port0_4 = 0 | (4 << GPIO_IRQ_LINE_SHIFT),
+    Line4Port0_12 = 1 | (4 << GPIO_IRQ_LINE_SHIFT),
+    Line4Port1_4 = 2 | (4 << GPIO_IRQ_LINE_SHIFT),
+    Line4Port1_12 = 3 | (4 << GPIO_IRQ_LINE_SHIFT),
+    Line4Port2_4 = 4 | (4 << GPIO_IRQ_LINE_SHIFT),
+    Line4Port0_0 = 5 | (4 << GPIO_IRQ_LINE_SHIFT),
+    Line4Port0_8 = 6 | (4 << GPIO_IRQ_LINE_SHIFT),
+    Line4Port1_0 = 7 | (4 << GPIO_IRQ_LINE_SHIFT),
+    Line4Port1_8 = 8 | (4 << GPIO_IRQ_LINE_SHIFT),
+    Line4Port2_0 = 9 | (4 << GPIO_IRQ_LINE_SHIFT),
+
+    Line5Port0_5 = 0 | (5 << GPIO_IRQ_LINE_SHIFT),
+    Line5Port0_13 = 1 | (5 << GPIO_IRQ_LINE_SHIFT),
+    Line5Port1_5 = 2 | (5 << GPIO_IRQ_LINE_SHIFT),
+    Line5Port1_13 = 3 | (5 << GPIO_IRQ_LINE_SHIFT),
+    Line5Port2_5 = 4 | (5 << GPIO_IRQ_LINE_SHIFT),
+    Line5Port0_1 = 5 | (5 << GPIO_IRQ_LINE_SHIFT),
+    Line5Port0_9 = 6 | (5 << GPIO_IRQ_LINE_SHIFT),
+    Line5Port1_1 = 7 | (5 << GPIO_IRQ_LINE_SHIFT),
+    Line5Port1_9 = 8 | (5 << GPIO_IRQ_LINE_SHIFT),
+    Line5Port2_1 = 9 | (5 << GPIO_IRQ_LINE_SHIFT),
+
+    Line6Port0_6 = 0 | (6 << GPIO_IRQ_LINE_SHIFT),
+    Line6Port0_14 = 1 | (6 << GPIO_IRQ_LINE_SHIFT),
+    Line6Port1_6 = 2 | (6 << GPIO_IRQ_LINE_SHIFT),
+    Line6Port1_14 = 3 | (6 << GPIO_IRQ_LINE_SHIFT),
+    Line6Port2_6 = 4 | (6 << GPIO_IRQ_LINE_SHIFT),
+    Line6Port0_2 = 5 | (6 << GPIO_IRQ_LINE_SHIFT),
+    Line6Port0_10 = 6 | (6 << GPIO_IRQ_LINE_SHIFT),
+    Line6Port1_2 = 7 | (6 << GPIO_IRQ_LINE_SHIFT),
+    Line6Port1_10 = 8 | (6 << GPIO_IRQ_LINE_SHIFT),
+    Line6Port2_2 = 9 | (6 << GPIO_IRQ_LINE_SHIFT),
+
+    Line7Port0_7 = 0 | (7 << GPIO_IRQ_LINE_SHIFT),
+    Line7Port0_15 = 1 | (7 << GPIO_IRQ_LINE_SHIFT),
+    Line7Port1_7 = 2 | (7 << GPIO_IRQ_LINE_SHIFT),
+    Line7Port1_15 = 3 | (7 << GPIO_IRQ_LINE_SHIFT),
+    Line7Port2_7 = 4 | (7 << GPIO_IRQ_LINE_SHIFT),
+    Line7Port0_3 = 5 | (7 << GPIO_IRQ_LINE_SHIFT),
+    Line7Port0_11 = 6 | (7 << GPIO_IRQ_LINE_SHIFT),
+    Line7Port1_3 = 7 | (7 << GPIO_IRQ_LINE_SHIFT),
+    Line7Port1_11 = 8 | (7 << GPIO_IRQ_LINE_SHIFT),
+    Line7Port2_3 = 9 | (7 << GPIO_IRQ_LINE_SHIFT),
+}
+
+impl LineConfig {
+    #[inline(always)]
+    const fn bits(self) -> u32 {
+        self as u32
+    }
+
+    #[inline(always)]
+    const fn line(self) -> InterruptLine {
+        match self.bits() >> GPIO_IRQ_LINE_SHIFT {
+            0 => InterruptLine::Line0,
+            1 => InterruptLine::Line1,
+            2 => InterruptLine::Line2,
+            3 => InterruptLine::Line3,
+            4 => InterruptLine::Line4,
+            5 => InterruptLine::Line5,
+            6 => InterruptLine::Line6,
+            _ => InterruptLine::Line7,
+        }
+    }
+
+    #[inline(always)]
+    const fn mux(self) -> u32 {
+        self.bits() & GPIO_IRQ_LINE_MUX_MASK
+    }
+}
+
+pub fn init_interrupt_line(config: LineConfig, mode: InterruptMode) {
+    let p = unsafe { Peripherals::steal() };
+    let line = config.line();
+    let line_mask = line.mask();
+    let mode_bits = mode.bits();
+
+    critical_section::with(|cs| {
+        let mux = CURRENT_IRQ_LINE_MUX.borrow(cs);
+        let shift = line.mux_shift();
+        let mut current = mux.get();
+
+        current &= !(GPIO_IRQ_LINE_MUX_MASK << shift);
+        current |= config.mux() << shift;
+
+        mux.set(current);
+        p.gpio_irq.line_mux().write(|w| unsafe { w.bits(current) });
+    });
+
+    if mode_bits & GPIO_MODE_BIT_LEVEL != 0 {
+        p.gpio_irq
+            .level_set()
+            .write(|w| unsafe { w.bits(line_mask) });
+    } else {
+        p.gpio_irq
+            .level_clear()
+            .write(|w| unsafe { w.bits(line_mask) });
+    }
+
+    if mode_bits & GPIO_MODE_BIT_EDGE != 0 {
+        p.gpio_irq.edge().write(|w| unsafe { w.bits(line_mask) });
+    } else {
+        p.gpio_irq.level().write(|w| unsafe { w.bits(line_mask) });
+    }
+
+    if mode_bits & GPIO_MODE_BIT_ANY_EDGE != 0 {
+        p.gpio_irq
+            .any_edge_set()
+            .write(|w| unsafe { w.bits(line_mask) });
+    } else {
+        p.gpio_irq
+            .any_edge_clear()
+            .write(|w| unsafe { w.bits(line_mask) });
+    }
+
+    enable_interrupt_line(line);
+}
+
+pub fn deinit_interrupt_line(line: InterruptLine) {
+    let p = unsafe { Peripherals::steal() };
+    let line_mask = line.mask();
+
+    disable_interrupt_line(line);
+
+    critical_section::with(|cs| {
+        let mux = CURRENT_IRQ_LINE_MUX.borrow(cs);
+        let shift = line.mux_shift();
+        let current = mux.get() & !(GPIO_IRQ_LINE_MUX_MASK << shift);
+
+        mux.set(current);
+        p.gpio_irq.line_mux().write(|w| unsafe { w.bits(current) });
+    });
+
+    p.gpio_irq.level().write(|w| unsafe { w.bits(line_mask) });
+    p.gpio_irq
+        .level_clear()
+        .write(|w| unsafe { w.bits(line_mask) });
+    p.gpio_irq
+        .any_edge_clear()
+        .write(|w| unsafe { w.bits(line_mask) });
+}
+
+#[inline(always)]
+pub fn enable_interrupt_line(line: InterruptLine) {
+    let p = unsafe { Peripherals::steal() };
+    p.gpio_irq
+        .enable_set()
+        .write(|w| unsafe { w.bits(line.mask()) });
+}
+
+#[inline(always)]
+pub fn disable_interrupt_line(line: InterruptLine) {
+    let p = unsafe { Peripherals::steal() };
+    p.gpio_irq
+        .enable_clear()
+        .write(|w| unsafe { w.bits(line.mask()) });
+}
+
+#[inline(always)]
+pub fn line_interrupt_state(line: InterruptLine) -> bool {
+    let p = unsafe { Peripherals::steal() };
+    p.gpio_irq.interrupt().read().bits() & line.mask() != 0
+}
+
+#[inline(always)]
+pub fn line_pin_state(line: InterruptLine) -> bool {
+    let p = unsafe { Peripherals::steal() };
+    p.gpio_irq.state().read().bits() & line.mask() != 0
+}
+
+#[inline(always)]
+pub fn clear_interrupt(line: InterruptLine) {
+    let p = unsafe { Peripherals::steal() };
+    p.gpio_irq.clear().write(|w| unsafe { w.bits(line.mask()) });
+}
+
+#[inline(always)]
+pub fn clear_interrupts() {
+    let p = unsafe { Peripherals::steal() };
+    p.gpio_irq.clear().write(|w| unsafe { w.bits(0xff) });
 }
 
 pub struct Pin<const P: u8, const N: u8, MODE = Floating> {
