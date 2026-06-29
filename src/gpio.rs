@@ -325,6 +325,159 @@ pub fn clear_interrupts() {
     p.gpio_irq.clear().write(|w| unsafe { w.bits(0xff) });
 }
 
+pub trait InterruptSource<const LINE: u8> {
+    const LINE_CONFIG: LineConfig;
+}
+
+pub struct InterruptPin<PIN, const LINE: u8>
+where
+    PIN: InterruptSource<LINE>,
+{
+    pin: PIN,
+}
+
+impl<PIN, const LINE: u8> InterruptPin<PIN, LINE>
+where
+    PIN: InterruptSource<LINE>,
+{
+    pub fn new(pin: PIN, mode: InterruptMode) -> Self {
+        init_interrupt_line(PIN::LINE_CONFIG, mode);
+        Self { pin }
+    }
+
+    pub fn release(self) -> PIN {
+        self.pin
+    }
+
+    pub const fn line_config(&self) -> LineConfig {
+        PIN::LINE_CONFIG
+    }
+
+    pub const fn line(&self) -> InterruptLine {
+        PIN::LINE_CONFIG.line()
+    }
+
+    pub fn enable(&self) {
+        enable_interrupt_line(self.line());
+    }
+
+    pub fn disable(&self) {
+        disable_interrupt_line(self.line());
+    }
+
+    pub fn is_pending(&self) -> bool {
+        line_interrupt_state(self.line())
+    }
+
+    pub fn is_high(&self) -> bool {
+        line_pin_state(self.line())
+    }
+
+    pub fn is_low(&self) -> bool {
+        !self.is_high()
+    }
+
+    pub fn clear_interrupt(&self) {
+        clear_interrupt(self.line());
+    }
+}
+
+macro_rules! impl_interrupt_source {
+    ($port:literal, $pin:literal, $line:literal, $config:ident) => {
+        impl<MODE> InterruptSource<$line> for Pin<$port, $pin, MODE> {
+            const LINE_CONFIG: LineConfig = LineConfig::$config;
+        }
+    };
+}
+
+impl_interrupt_source!(0, 0, 0, Line0Port0_0);
+impl_interrupt_source!(0, 8, 0, Line0Port0_8);
+impl_interrupt_source!(1, 0, 0, Line0Port1_0);
+impl_interrupt_source!(1, 8, 0, Line0Port1_8);
+impl_interrupt_source!(2, 0, 0, Line0Port2_0);
+impl_interrupt_source!(0, 4, 0, Line0Port0_4);
+impl_interrupt_source!(0, 12, 0, Line0Port0_12);
+impl_interrupt_source!(1, 4, 0, Line0Port1_4);
+impl_interrupt_source!(1, 12, 0, Line0Port1_12);
+impl_interrupt_source!(2, 4, 0, Line0Port2_4);
+
+impl_interrupt_source!(0, 1, 1, Line1Port0_1);
+impl_interrupt_source!(0, 9, 1, Line1Port0_9);
+impl_interrupt_source!(1, 1, 1, Line1Port1_1);
+impl_interrupt_source!(1, 9, 1, Line1Port1_9);
+impl_interrupt_source!(2, 1, 1, Line1Port2_1);
+impl_interrupt_source!(0, 5, 1, Line1Port0_5);
+impl_interrupt_source!(0, 13, 1, Line1Port0_13);
+impl_interrupt_source!(1, 5, 1, Line1Port1_5);
+impl_interrupt_source!(1, 13, 1, Line1Port1_13);
+impl_interrupt_source!(2, 5, 1, Line1Port2_5);
+
+impl_interrupt_source!(0, 2, 2, Line2Port0_2);
+impl_interrupt_source!(0, 10, 2, Line2Port0_10);
+impl_interrupt_source!(1, 2, 2, Line2Port1_2);
+impl_interrupt_source!(1, 10, 2, Line2Port1_10);
+impl_interrupt_source!(2, 2, 2, Line2Port2_2);
+impl_interrupt_source!(0, 6, 2, Line2Port0_6);
+impl_interrupt_source!(0, 14, 2, Line2Port0_14);
+impl_interrupt_source!(1, 6, 2, Line2Port1_6);
+impl_interrupt_source!(1, 14, 2, Line2Port1_14);
+impl_interrupt_source!(2, 6, 2, Line2Port2_6);
+
+impl_interrupt_source!(0, 3, 3, Line3Port0_3);
+impl_interrupt_source!(0, 11, 3, Line3Port0_11);
+impl_interrupt_source!(1, 3, 3, Line3Port1_3);
+impl_interrupt_source!(1, 11, 3, Line3Port1_11);
+impl_interrupt_source!(2, 3, 3, Line3Port2_3);
+impl_interrupt_source!(0, 7, 3, Line3Port0_7);
+impl_interrupt_source!(0, 15, 3, Line3Port0_15);
+impl_interrupt_source!(1, 7, 3, Line3Port1_7);
+impl_interrupt_source!(1, 15, 3, Line3Port1_15);
+impl_interrupt_source!(2, 7, 3, Line3Port2_7);
+
+impl_interrupt_source!(0, 4, 4, Line4Port0_4);
+impl_interrupt_source!(0, 12, 4, Line4Port0_12);
+impl_interrupt_source!(1, 4, 4, Line4Port1_4);
+impl_interrupt_source!(1, 12, 4, Line4Port1_12);
+impl_interrupt_source!(2, 4, 4, Line4Port2_4);
+impl_interrupt_source!(0, 0, 4, Line4Port0_0);
+impl_interrupt_source!(0, 8, 4, Line4Port0_8);
+impl_interrupt_source!(1, 0, 4, Line4Port1_0);
+impl_interrupt_source!(1, 8, 4, Line4Port1_8);
+impl_interrupt_source!(2, 0, 4, Line4Port2_0);
+
+impl_interrupt_source!(0, 5, 5, Line5Port0_5);
+impl_interrupt_source!(0, 13, 5, Line5Port0_13);
+impl_interrupt_source!(1, 5, 5, Line5Port1_5);
+impl_interrupt_source!(1, 13, 5, Line5Port1_13);
+impl_interrupt_source!(2, 5, 5, Line5Port2_5);
+impl_interrupt_source!(0, 1, 5, Line5Port0_1);
+impl_interrupt_source!(0, 9, 5, Line5Port0_9);
+impl_interrupt_source!(1, 1, 5, Line5Port1_1);
+impl_interrupt_source!(1, 9, 5, Line5Port1_9);
+impl_interrupt_source!(2, 1, 5, Line5Port2_1);
+
+impl_interrupt_source!(0, 6, 6, Line6Port0_6);
+impl_interrupt_source!(0, 14, 6, Line6Port0_14);
+impl_interrupt_source!(1, 6, 6, Line6Port1_6);
+impl_interrupt_source!(1, 14, 6, Line6Port1_14);
+impl_interrupt_source!(2, 6, 6, Line6Port2_6);
+impl_interrupt_source!(0, 2, 6, Line6Port0_2);
+impl_interrupt_source!(0, 10, 6, Line6Port0_10);
+impl_interrupt_source!(1, 2, 6, Line6Port1_2);
+impl_interrupt_source!(1, 10, 6, Line6Port1_10);
+impl_interrupt_source!(2, 2, 6, Line6Port2_2);
+
+impl_interrupt_source!(0, 7, 7, Line7Port0_7);
+impl_interrupt_source!(0, 15, 7, Line7Port0_15);
+impl_interrupt_source!(1, 7, 7, Line7Port1_7);
+impl_interrupt_source!(1, 15, 7, Line7Port1_15);
+impl_interrupt_source!(2, 7, 7, Line7Port2_7);
+impl_interrupt_source!(0, 3, 7, Line7Port0_3);
+impl_interrupt_source!(0, 11, 7, Line7Port0_11);
+impl_interrupt_source!(1, 3, 7, Line7Port1_3);
+impl_interrupt_source!(1, 11, 7, Line7Port1_11);
+impl_interrupt_source!(2, 3, 7, Line7Port2_3);
+
 pub struct Pin<const P: u8, const N: u8, MODE = Floating> {
     _mode: PhantomData<MODE>,
 }
@@ -354,6 +507,18 @@ pub trait InputMode {}
 impl InputMode for Floating {}
 impl InputMode for PullDown {}
 impl InputMode for PullUp {}
+
+impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE>
+where
+    MODE: InputMode,
+{
+    pub fn into_interrupt_pin<const LINE: u8>(self, mode: InterruptMode) -> InterruptPin<Self, LINE>
+    where
+        Self: InterruptSource<LINE>,
+    {
+        InterruptPin::new(self, mode)
+    }
+}
 
 #[inline(always)]
 fn set_gpio_function<const P: u8, const N: u8>(p: &Peripherals) {
