@@ -24,6 +24,21 @@ pub struct Func3Mode;
 /// Analog mode (type state)
 pub struct Analog;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DriveStrength {
+    Ma2 = 0b00,
+    Ma4 = 0b01,
+    Ma8 = 0b10,
+}
+
+impl DriveStrength {
+    #[inline(always)]
+    const fn bits(self) -> u32 {
+        self as u32
+    }
+}
+
 pub struct Pin<const P: u8, const N: u8, MODE = Floating> {
     _mode: PhantomData<MODE>,
 }
@@ -31,6 +46,16 @@ pub struct Pin<const P: u8, const N: u8, MODE = Floating> {
 impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
     pub const fn new() -> Self {
         Self { _mode: PhantomData }
+    }
+
+    pub fn set_drive_strength(&mut self, drive_strength: DriveStrength) {
+        let p = unsafe { Peripherals::steal() };
+        set_drive_strength::<P, N>(&p, drive_strength);
+    }
+
+    pub fn with_drive_strength(mut self, drive_strength: DriveStrength) -> Self {
+        self.set_drive_strength(drive_strength);
+        self
     }
 }
 
@@ -107,6 +132,29 @@ fn set_pull<const P: u8, const N: u8>(p: &Peripherals, pull: u32) {
             .pad_config
             .pad2_pupd()
             .modify(|r, w| unsafe { w.bits((r.bits() & !mask) | (pull << shift)) }),
+        _ => panic!("Invalid port number {}", P),
+    };
+}
+
+#[inline(always)]
+fn set_drive_strength<const P: u8, const N: u8>(p: &Peripherals, drive_strength: DriveStrength) {
+    let shift = 2 * N;
+    let mask = 0b11u32 << shift;
+    let value = drive_strength.bits() << shift;
+
+    match P {
+        0 => p
+            .pad_config
+            .pad0_ds()
+            .modify(|r, w| unsafe { w.bits((r.bits() & !mask) | value) }),
+        1 => p
+            .pad_config
+            .pad1_ds()
+            .modify(|r, w| unsafe { w.bits((r.bits() & !mask) | value) }),
+        2 => p
+            .pad_config
+            .pad2_ds()
+            .modify(|r, w| unsafe { w.bits((r.bits() & !mask) | value) }),
         _ => panic!("Invalid port number {}", P),
     };
 }
