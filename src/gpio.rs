@@ -1,7 +1,7 @@
 //! GPIO
 use core::convert::Infallible;
 use core::marker::PhantomData;
-use embedded_hal::digital::{ErrorType, InputPin, OutputPin};
+use embedded_hal::digital::{ErrorType, InputPin, OutputPin, StatefulOutputPin};
 
 use mik32_pac::Peripherals;
 
@@ -267,6 +267,28 @@ impl<const P: u8, const N: u8> OutputPin for Pin<P, N, Output> {
         }
 
         Ok(())
+    }
+}
+
+impl<const P: u8, const N: u8> StatefulOutputPin for Pin<P, N, Output> {
+    #[inline(always)]
+    fn is_set_high(&mut self) -> Result<bool, Self::Error> {
+        let p = unsafe { Peripherals::steal() };
+        let mask = 1u32 << N;
+
+        let is_set = match P {
+            0 => p.gpio16_0.output().read().bits() & mask != 0,
+            1 => p.gpio16_1.output().read().bits() & mask != 0,
+            2 => p.gpio8_2.output().read().bits() & mask != 0,
+            _ => panic!("Invalid port number {}", P),
+        };
+
+        Ok(is_set)
+    }
+
+    #[inline(always)]
+    fn is_set_low(&mut self) -> Result<bool, Self::Error> {
+        self.is_set_high().map(|is_high| !is_high)
     }
 }
 
