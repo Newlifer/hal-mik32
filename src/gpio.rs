@@ -21,6 +21,9 @@ pub struct Output;
 pub struct Func2Mode;
 pub struct Func3Mode;
 
+/// Analog mode (type state)
+pub struct Analog;
+
 pub struct Pin<const P: u8, const N: u8, MODE = Floating> {
     _mode: PhantomData<MODE>,
 }
@@ -34,6 +37,7 @@ impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
 pub trait OutputPermitted {}
 pub trait SerialPermitted {}
 pub trait TimerSerialPermitted {}
+pub trait AnalogPermitted {}
 pub trait InputMode {}
 
 impl InputMode for Floating {}
@@ -191,22 +195,19 @@ impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
         let p = unsafe { Peripherals::steal() };
 
         set_alternate_function::<P, N>(&p, 0b01);
+        set_pull::<P, N>(&p, 0);
 
-        // // FIXME gpio16_0 – нужно выбирать в зависимости от P
-        // p.gpio16_0.direction_in().write(|w| unsafe { w.bits(1 << N) });
+        Pin::new()
+    }
 
-        // let mask = 0b11 << 2 * N;
-        // let value = 0b01 << 2 * N;
+    pub fn into_serial_port_pull_up(self) -> Pin<P, N, Func2Mode>
+    where
+        Pin<P, N>: SerialPermitted,
+    {
+        let p = unsafe { Peripherals::steal() };
 
-        // p.pad_config.pad0_cfg().modify(
-        //     |r, w|
-        //     unsafe { w.bits((r.bits() & !mask) | value) }
-        // );
-
-        // p.gpio16_0.func_sel().modify(
-        //     |r, w|
-        //     unsafe { w.bits(r.bits() | (1 << N)) }
-        // );
+        set_alternate_function::<P, N>(&p, 0b01);
+        set_pull::<P, N>(&p, 1);
 
         Pin::new()
     }
@@ -217,6 +218,17 @@ impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
     {
         let p = unsafe { Peripherals::steal() };
         set_alternate_function::<P, N>(&p, 0b10);
+        set_pull::<P, N>(&p, 0);
+        Pin::new()
+    }
+
+    pub fn into_analog(self) -> Pin<P, N, Analog>
+    where
+        Pin<P, N>: AnalogPermitted,
+    {
+        let p = unsafe { Peripherals::steal() };
+        set_alternate_function::<P, N>(&p, 0b11);
+        set_pull::<P, N>(&p, 0);
         Pin::new()
     }
 }
@@ -318,61 +330,88 @@ where
 }
 
 pub mod port_0 {
-    use super::{OutputPermitted, Pin, SerialPermitted};
+    use super::{AnalogPermitted, OutputPermitted, Pin, SerialPermitted, TimerSerialPermitted};
 
     pub type Pin00 = Pin<0, 0>;
     impl OutputPermitted for Pin<0, 0> {}
+    impl SerialPermitted for Pin<0, 0> {}
+    impl TimerSerialPermitted for Pin<0, 0> {}
 
     pub type Pin01 = Pin<0, 1>;
     impl OutputPermitted for Pin<0, 1> {}
+    impl SerialPermitted for Pin<0, 1> {}
+    impl TimerSerialPermitted for Pin<0, 1> {}
 
     pub type Pin02 = Pin<0, 2>;
     impl OutputPermitted for Pin<0, 2> {}
+    impl SerialPermitted for Pin<0, 2> {}
+    impl TimerSerialPermitted for Pin<0, 2> {}
+    impl AnalogPermitted for Pin<0, 2> {}
 
     pub type Pin03 = Pin<0, 3>;
     impl OutputPermitted for Pin<0, 3> {}
+    impl SerialPermitted for Pin<0, 3> {}
+    impl TimerSerialPermitted for Pin<0, 3> {}
 
     pub type Pin04 = Pin<0, 4>;
     impl OutputPermitted for Pin<0, 4> {}
+    impl SerialPermitted for Pin<0, 4> {}
+    impl TimerSerialPermitted for Pin<0, 4> {}
+    impl AnalogPermitted for Pin<0, 4> {}
 
     // GPIO
     // UART 0 RX
     pub type Pin05 = Pin<0, 5>;
     impl OutputPermitted for Pin<0, 5> {}
     impl SerialPermitted for Pin<0, 5> {}
+    impl TimerSerialPermitted for Pin<0, 5> {}
 
     // GPIO
     // UART 0 TX
     pub type Pin06 = Pin<0, 6>;
     impl OutputPermitted for Pin<0, 6> {}
     impl SerialPermitted for Pin<0, 6> {}
+    impl TimerSerialPermitted for Pin<0, 6> {}
 
     // GPIO
     // UART 0 NCTS
     pub type Pin07 = Pin<0, 7>;
     impl OutputPermitted for Pin<0, 7> {}
     impl SerialPermitted for Pin<0, 7> {}
+    impl TimerSerialPermitted for Pin<0, 7> {}
+    impl AnalogPermitted for Pin<0, 7> {}
 
     // GPIO
     // UART 0 NRTS
     pub type Pin08 = Pin<0, 8>;
     impl OutputPermitted for Pin<0, 8> {}
     impl SerialPermitted for Pin<0, 8> {}
+    impl TimerSerialPermitted for Pin<0, 8> {}
 
     pub type Pin09 = Pin<0, 9>;
     impl OutputPermitted for Pin<0, 9> {}
+    impl SerialPermitted for Pin<0, 9> {}
+    impl TimerSerialPermitted for Pin<0, 9> {}
+    impl AnalogPermitted for Pin<0, 9> {}
 
     pub type Pin10 = Pin<0, 10>;
     impl OutputPermitted for Pin<0, 10> {}
+    impl SerialPermitted for Pin<0, 10> {}
+    impl TimerSerialPermitted for Pin<0, 10> {}
 
     pub type Pin11 = Pin<0, 11>;
     impl OutputPermitted for Pin<0, 11> {}
+    impl TimerSerialPermitted for Pin<0, 11> {}
+    impl AnalogPermitted for Pin<0, 11> {}
 
     pub type Pin12 = Pin<0, 12>;
     impl OutputPermitted for Pin<0, 12> {}
+    impl TimerSerialPermitted for Pin<0, 12> {}
 
     pub type Pin13 = Pin<0, 13>;
     impl OutputPermitted for Pin<0, 13> {}
+    impl TimerSerialPermitted for Pin<0, 13> {}
+    impl AnalogPermitted for Pin<0, 13> {}
 
     pub type Pin14 = Pin<0, 14>;
     impl OutputPermitted for Pin<0, 14> {}
@@ -382,33 +421,48 @@ pub mod port_0 {
 }
 
 pub mod port_1 {
-    use super::{OutputPermitted, Pin, SerialPermitted, TimerSerialPermitted};
+    use super::{AnalogPermitted, OutputPermitted, Pin, SerialPermitted, TimerSerialPermitted};
 
     pub type Pin00 = Pin<1, 0>;
     impl OutputPermitted for Pin<1, 0> {}
+    impl SerialPermitted for Pin<1, 0> {}
+    impl TimerSerialPermitted for Pin<1, 0> {}
 
     pub type Pin01 = Pin<1, 1>;
     impl OutputPermitted for Pin<1, 1> {}
+    impl SerialPermitted for Pin<1, 1> {}
+    impl TimerSerialPermitted for Pin<1, 1> {}
 
     pub type Pin02 = Pin<1, 2>;
     impl OutputPermitted for Pin<1, 2> {}
+    impl SerialPermitted for Pin<1, 2> {}
+    impl TimerSerialPermitted for Pin<1, 2> {}
 
     pub type Pin03 = Pin<1, 3>;
     impl OutputPermitted for Pin<1, 3> {}
+    impl SerialPermitted for Pin<1, 3> {}
+    impl TimerSerialPermitted for Pin<1, 3> {}
 
     pub type Pin04 = Pin<1, 4>;
     impl OutputPermitted for Pin<1, 4> {}
+    impl SerialPermitted for Pin<1, 4> {}
+    impl TimerSerialPermitted for Pin<1, 4> {}
 
     pub type Pin05 = Pin<1, 5>;
     impl OutputPermitted for Pin<1, 5> {}
+    impl SerialPermitted for Pin<1, 5> {}
     impl TimerSerialPermitted for Pin<1, 5> {}
+    impl AnalogPermitted for Pin<1, 5> {}
 
     pub type Pin06 = Pin<1, 6>;
     impl OutputPermitted for Pin<1, 6> {}
+    impl SerialPermitted for Pin<1, 6> {}
     impl TimerSerialPermitted for Pin<1, 6> {}
 
     pub type Pin07 = Pin<1, 7>;
     impl OutputPermitted for Pin<1, 7> {}
+    impl SerialPermitted for Pin<1, 7> {}
+    impl AnalogPermitted for Pin<1, 7> {}
 
     // GPIO
     // UART 1 RX
@@ -425,55 +479,70 @@ pub mod port_1 {
     pub type Pin10 = Pin<1, 10>;
     impl OutputPermitted for Pin<1, 10> {}
     impl SerialPermitted for Pin<1, 10> {}
+    impl AnalogPermitted for Pin<1, 10> {}
 
     pub type Pin11 = Pin<1, 11>;
     impl OutputPermitted for Pin<1, 11> {}
     impl SerialPermitted for Pin<1, 11> {}
+    impl AnalogPermitted for Pin<1, 11> {}
 
     pub type Pin12 = Pin<1, 12>;
     impl OutputPermitted for Pin<1, 12> {}
+    impl SerialPermitted for Pin<1, 12> {}
     impl TimerSerialPermitted for Pin<1, 12> {}
+    impl AnalogPermitted for Pin<1, 12> {}
 
     pub type Pin13 = Pin<1, 13>;
     impl OutputPermitted for Pin<1, 13> {}
+    impl SerialPermitted for Pin<1, 13> {}
     impl TimerSerialPermitted for Pin<1, 13> {}
+    impl AnalogPermitted for Pin<1, 13> {}
 
     pub type Pin14 = Pin<1, 14>;
     impl OutputPermitted for Pin<1, 14> {}
+    impl SerialPermitted for Pin<1, 14> {}
     impl TimerSerialPermitted for Pin<1, 14> {}
 
     pub type Pin15 = Pin<1, 15>;
     impl OutputPermitted for Pin<1, 15> {}
+    impl SerialPermitted for Pin<1, 15> {}
     impl TimerSerialPermitted for Pin<1, 15> {}
 }
 
 pub mod port_2 {
-    use super::{OutputPermitted, Pin, TimerSerialPermitted};
+    use super::{OutputPermitted, Pin, SerialPermitted, TimerSerialPermitted};
 
     pub type Pin00 = Pin<2, 0>;
     impl OutputPermitted for Pin<2, 0> {}
+    impl SerialPermitted for Pin<2, 0> {}
     impl TimerSerialPermitted for Pin<2, 0> {}
 
     pub type Pin01 = Pin<2, 1>;
     impl OutputPermitted for Pin<2, 1> {}
+    impl SerialPermitted for Pin<2, 1> {}
     impl TimerSerialPermitted for Pin<2, 1> {}
 
     pub type Pin02 = Pin<2, 2>;
     impl OutputPermitted for Pin<2, 2> {}
+    impl SerialPermitted for Pin<2, 2> {}
     impl TimerSerialPermitted for Pin<2, 2> {}
 
     pub type Pin03 = Pin<2, 3>;
     impl OutputPermitted for Pin<2, 3> {}
+    impl SerialPermitted for Pin<2, 3> {}
     impl TimerSerialPermitted for Pin<2, 3> {}
 
     pub type Pin04 = Pin<2, 4>;
     impl OutputPermitted for Pin<2, 4> {}
+    impl SerialPermitted for Pin<2, 4> {}
 
     pub type Pin05 = Pin<2, 5>;
     impl OutputPermitted for Pin<2, 5> {}
+    impl SerialPermitted for Pin<2, 5> {}
 
     pub type Pin06 = Pin<2, 6>;
     impl OutputPermitted for Pin<2, 6> {}
+    impl SerialPermitted for Pin<2, 6> {}
     impl TimerSerialPermitted for Pin<2, 6> {}
 
     pub type Pin07 = Pin<2, 7>;
