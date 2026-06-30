@@ -214,8 +214,25 @@ impl LineConfig {
     }
 }
 
+pub struct GpioPort<const P: u8>;
+
+pub struct GpioInterrupts;
+
+pub fn init_port<const P: u8>() -> GpioPort<P> {
+    let p = unsafe { Peripherals::steal() };
+    enable_gpio_pin_clocks::<P>(&p);
+    GpioPort
+}
+
+pub fn init_interrupts() -> GpioInterrupts {
+    let p = unsafe { Peripherals::steal() };
+    enable_gpio_irq_clock(&p);
+    GpioInterrupts
+}
+
 pub fn init_interrupt_line(config: LineConfig, mode: InterruptMode) {
     let p = unsafe { Peripherals::steal() };
+
     let line = config.line();
     let line_mask = line.mask();
     let mode_bits = mode.bits();
@@ -263,6 +280,7 @@ pub fn init_interrupt_line(config: LineConfig, mode: InterruptMode) {
 
 pub fn deinit_interrupt_line(line: InterruptLine) {
     let p = unsafe { Peripherals::steal() };
+
     let line_mask = line.mask();
 
     disable_interrupt_line(line);
@@ -288,6 +306,7 @@ pub fn deinit_interrupt_line(line: InterruptLine) {
 #[inline(always)]
 pub fn enable_interrupt_line(line: InterruptLine) {
     let p = unsafe { Peripherals::steal() };
+
     p.gpio_irq
         .enable_set()
         .write(|w| unsafe { w.bits(line.mask()) });
@@ -296,6 +315,7 @@ pub fn enable_interrupt_line(line: InterruptLine) {
 #[inline(always)]
 pub fn disable_interrupt_line(line: InterruptLine) {
     let p = unsafe { Peripherals::steal() };
+
     p.gpio_irq
         .enable_clear()
         .write(|w| unsafe { w.bits(line.mask()) });
@@ -304,24 +324,28 @@ pub fn disable_interrupt_line(line: InterruptLine) {
 #[inline(always)]
 pub fn line_interrupt_state(line: InterruptLine) -> bool {
     let p = unsafe { Peripherals::steal() };
+
     p.gpio_irq.interrupt().read().bits() & line.mask() != 0
 }
 
 #[inline(always)]
 pub fn line_pin_state(line: InterruptLine) -> bool {
     let p = unsafe { Peripherals::steal() };
+
     p.gpio_irq.state().read().bits() & line.mask() != 0
 }
 
 #[inline(always)]
 pub fn clear_interrupt(line: InterruptLine) {
     let p = unsafe { Peripherals::steal() };
+
     p.gpio_irq.clear().write(|w| unsafe { w.bits(line.mask()) });
 }
 
 #[inline(always)]
 pub fn clear_interrupts() {
     let p = unsafe { Peripherals::steal() };
+
     p.gpio_irq.clear().write(|w| unsafe { w.bits(0xff) });
 }
 
@@ -489,6 +513,7 @@ impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
 
     pub fn set_drive_strength(&mut self, drive_strength: DriveStrength) {
         let p = unsafe { Peripherals::steal() };
+
         set_drive_strength::<P, N>(&p, drive_strength);
     }
 
@@ -629,12 +654,40 @@ fn set_direction_in<const P: u8, const N: u8>(p: &Peripherals) {
     };
 }
 
+#[inline(always)]
+fn enable_pad_config_clock(p: &Peripherals) {
+    p.pm.clk_apb_m_set()
+        .modify(|_, w| w.pad_config().enable().pm().enable());
+}
+
+#[inline(always)]
+fn enable_gpio_clock<const P: u8>(p: &Peripherals) {
+    match P {
+        0 => p.pm.clk_apb_p_set().modify(|_, w| w.gpio_0().enable()),
+        1 => p.pm.clk_apb_p_set().modify(|_, w| w.gpio_1().enable()),
+        2 => p.pm.clk_apb_p_set().modify(|_, w| w.gpio_2().enable()),
+        _ => panic!("Invalid port number {}", P),
+    };
+}
+
+#[inline(always)]
+fn enable_gpio_pin_clocks<const P: u8>(p: &Peripherals) {
+    enable_pad_config_clock(p);
+    enable_gpio_clock::<P>(p);
+}
+
+#[inline(always)]
+fn enable_gpio_irq_clock(p: &Peripherals) {
+    p.pm.clk_apb_p_set().modify(|_, w| w.gpio_irq().enable());
+}
+
 impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
     pub fn into_output(self) -> Pin<P, N, Output>
     where
         Pin<P, N>: OutputPermitted,
     {
         let p = unsafe { Peripherals::steal() };
+
         set_gpio_function::<P, N>(&p);
         set_pull::<P, N>(&p, 0);
 
@@ -662,6 +715,7 @@ impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
 
     pub fn into_floating_input(self) -> Pin<P, N, Floating> {
         let p = unsafe { Peripherals::steal() };
+
         set_gpio_function::<P, N>(&p);
         set_pull::<P, N>(&p, 0);
         set_direction_in::<P, N>(&p);
@@ -671,6 +725,7 @@ impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
 
     pub fn into_pull_up_input(self) -> Pin<P, N, PullUp> {
         let p = unsafe { Peripherals::steal() };
+
         set_gpio_function::<P, N>(&p);
         set_pull::<P, N>(&p, 1);
         set_direction_in::<P, N>(&p);
@@ -680,6 +735,7 @@ impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
 
     pub fn into_pull_down_input(self) -> Pin<P, N, PullDown> {
         let p = unsafe { Peripherals::steal() };
+
         set_gpio_function::<P, N>(&p);
         set_pull::<P, N>(&p, 2);
         set_direction_in::<P, N>(&p);
@@ -716,6 +772,7 @@ impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
         Pin<P, N>: TimerSerialPermitted,
     {
         let p = unsafe { Peripherals::steal() };
+
         set_alternate_function::<P, N>(&p, 0b10);
         set_pull::<P, N>(&p, 0);
         Pin::new()
@@ -726,6 +783,7 @@ impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
         Pin<P, N>: AnalogPermitted,
     {
         let p = unsafe { Peripherals::steal() };
+
         set_alternate_function::<P, N>(&p, 0b11);
         set_pull::<P, N>(&p, 0);
         Pin::new()
@@ -785,6 +843,7 @@ impl<const P: u8, const N: u8> StatefulOutputPin for Pin<P, N, Output> {
     #[inline(always)]
     fn is_set_high(&mut self) -> Result<bool, Self::Error> {
         let p = unsafe { Peripherals::steal() };
+
         let mask = 1u32 << N;
 
         let is_set = match P {
@@ -810,6 +869,7 @@ where
     #[inline(always)]
     fn is_high(&mut self) -> Result<bool, Self::Error> {
         let p = unsafe { Peripherals::steal() };
+
         let mask = 1u32 << N;
 
         let is_set = match P {
