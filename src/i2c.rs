@@ -1003,7 +1003,7 @@ impl<I2C: Instance> I2c<I2C> {
     }
 
     fn read_byte(i2c: &RegisterBlock) -> u8 {
-        i2c.rxdr().read().txdata().bits()
+        i2c.rxdr().read().rxdata().bits()
     }
 
     fn wait_chunk_end(
