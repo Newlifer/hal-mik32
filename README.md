@@ -36,10 +36,10 @@ After RCC, GPIO, and USART are in place, the order is not important. Each comple
 - [ ] EPIC
 - [ ] Timer32 0
 - [ ] Timer32 1+2
-- [ ] Timer16 (both)
+- [x] Timer16 (both)
 - [ ] DMA
 - [ ] SPI
-- [ ] SPIFI
+- [x] SPIFI (sync, but not async)
 - [x] I2C
 - [ ] WDT
 - [ ] EEPROM
