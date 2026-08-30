@@ -1,296 +1,274 @@
-//! Управление внешним контроллером прерываний EPIC.
+//! External Peripheral Interrupt Controller (EPIC).
 //!
-//! "Штатный" контроллер прерываний в ядре отключен. Управление
-//! статусом (вкл, выкл) осуществляется через регистр mie (см. модуль interrupts).
-//!
-//! Все прерывания обрабатываются единым обработчиком trap_handler.
-//! // TODO: вынести listen для level в отдельный, чтобы можно было писать сразу несколько линий,
-//! а не по одной, так как при записи в регистр mask_level_set перезаписывается вся маска целиком
-use core::option::Option;
-use core::u32;
-use mik32_pac::{Epic, Peripherals};
+//! EPIC combines 32 peripheral interrupt lines into one machine external
+//! interrupt. It has no vector table or hardware priorities; dispatching is
+//! done in software by reading [`Epic::pending`].
 
-/// Тип срабатывания прерывания
-///
-/// # Variants
-///
-/// - `Edge` - по фронту
-/// - `Level` - по уровню
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
+use mik32_pac::Epic as EpicPeripheral;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trigger {
-    Edge,  // Срабатывание по фронту
-    Level, // Срабатывание по уровню
+    Edge,
+    Level,
 }
 
-/// Линии прерывания
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum InterruptLine {
-    Timer32_0 = 1 << 0,         // Таймер 32_0 - линия 0
-    USART0 = 1 << 1,            // USART0 - линия 1
-    USART1 = 1 << 2,            // USART1 - линия 2
-    SPI0 = 1 << 3,              // SPI0 - линия 3
-    SPI1 = 1 << 4,              // SPI1 - линия 4
-    GPIO = 1 << 5,              // GPIO - линия 5
-    I2C0 = 1 << 6,              // I2C0 - линия 6
-    I2C1 = 1 << 7,              // I2C1 - линия 7
-    WDT = 1 << 8,               // WDT - линия 8
-    Timer16_0 = 1 << 9,         // Таймер 16_0 - линия 9
-    Timer16_1 = 1 << 10,        // Таймер 16_1 - линия 10
-    Timer16_2 = 1 << 11,        // Таймер 16_2 - линия 11
-    Timer32_1 = 1 << 12,        // Таймер 32_1 - линия 12
-    Timer32_2 = 1 << 13,        // Таймер 32_2 - линия 13
-    SPIFI = 1 << 14,            // SPIFI - линия 14
-    RTC = 1 << 15,              // RTC - линия 15
-    EEPROM = 1 << 16,           // EEPROM - линия 16
-    WdtDom3 = 1 << 17,          // WDT домен 3 - линия 17
-    WdtSpifi = 1 << 18,         // WDT SPIFI - линия 18
-    WdtEeprom = 1 << 19,        // WDT EEPROM - линия 19
-    DMA = 1 << 20,              // DMA - линия 20
-    FrequencyMonitor = 1 << 21, // Монитор частоты - линия 21
-    AVCCOver = 1 << 22,         // AVCC выше порога - линия 22
-    AVCCUnder = 1 << 23,        // AVCC ниже порога - линия 23
-    VCCOver = 1 << 24,          // VCC выше порога - линия 24
-    VCCUnder = 1 << 25,         // VCC ниже порога - линия 25
-    LowBattery = 1 << 26,       // Низкий заряд батареи - линия 26
-    BrownOut = 1 << 27,         // Brown Out - линия 27
-    TSENS = 1 << 28,            // Датчик температуры - линия 28
-    ADC = 1 << 29,              // ADC - линия 29
-    DAC0 = 1 << 30,             // DAC0 - линия 30
-    DAC1 = 1 << 31,             // DAC1 - линия 31
+/// One of the 32 EPIC input lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Interrupt {
+    Timer32_0 = 0,
+    Usart0 = 1,
+    Usart1 = 2,
+    Spi0 = 3,
+    Spi1 = 4,
+    Gpio = 5,
+    I2c0 = 6,
+    I2c1 = 7,
+    Wdt = 8,
+    Timer16_0 = 9,
+    Timer16_1 = 10,
+    Timer16_2 = 11,
+    Timer32_1 = 12,
+    Timer32_2 = 13,
+    Spifi = 14,
+    Rtc = 15,
+    Eeprom = 16,
+    WdtBusDom3 = 17,
+    WdtBusSpifi = 18,
+    WdtBusEeprom = 19,
+    Dma = 20,
+    FrequencyMonitor = 21,
+    PvdAvccUnder = 22,
+    PvdAvccOver = 23,
+    PvdVccUnder = 24,
+    PvdVccOver = 25,
+    BatteryLow = 26,
+    BrownOut = 27,
+    Tsens = 28,
+    Adc = 29,
+    Dac0 = 30,
+    Dac1 = 31,
 }
 
-impl InterruptLine {
-    #[inline(always)]
-    pub const fn mask(self) -> u32 {
-        self as u32
+impl Interrupt {
+    pub const fn mask(self) -> InterruptMask {
+        InterruptMask(1 << self as u8)
+    }
+
+    const fn from_index(index: u32) -> Self {
+        ALL_INTERRUPTS[index as usize]
     }
 }
 
-#[derive(Debug)]
-pub enum Error {
-    LineLevelSet,
-    LineEdgeSet,
-    LineNeverSet,
-}
+const ALL_INTERRUPTS: [Interrupt; 32] = [
+    Interrupt::Timer32_0,
+    Interrupt::Usart0,
+    Interrupt::Usart1,
+    Interrupt::Spi0,
+    Interrupt::Spi1,
+    Interrupt::Gpio,
+    Interrupt::I2c0,
+    Interrupt::I2c1,
+    Interrupt::Wdt,
+    Interrupt::Timer16_0,
+    Interrupt::Timer16_1,
+    Interrupt::Timer16_2,
+    Interrupt::Timer32_1,
+    Interrupt::Timer32_2,
+    Interrupt::Spifi,
+    Interrupt::Rtc,
+    Interrupt::Eeprom,
+    Interrupt::WdtBusDom3,
+    Interrupt::WdtBusSpifi,
+    Interrupt::WdtBusEeprom,
+    Interrupt::Dma,
+    Interrupt::FrequencyMonitor,
+    Interrupt::PvdAvccUnder,
+    Interrupt::PvdAvccOver,
+    Interrupt::PvdVccUnder,
+    Interrupt::PvdVccOver,
+    Interrupt::BatteryLow,
+    Interrupt::BrownOut,
+    Interrupt::Tsens,
+    Interrupt::Adc,
+    Interrupt::Dac0,
+    Interrupt::Dac1,
+];
 
-/// Контроллер прерываний
-pub struct EPIC {
-    dp: Epic,
-    line_mask: u32,
-}
+/// A set of EPIC interrupt lines.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InterruptMask(u32);
 
-impl EPIC {
-    /// Конструктор
-    ///
-    /// # Arguments
-    ///
-    /// - `dp` (`Epic`) - контроллер прерываний из PAC
-    ///
-    /// # Returns
-    ///
-    /// - `Self` - экземпляр контроллера
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use crate::epic::EPIC;
-    ///
-    /// let dp = Peripherals::take().unwrap();
-    /// let mut epic = EPIC::new(dp.epic);
-    /// ```
-    pub fn new(dp: Epic) -> Self {
-        // EPIC sits on the APB_M clock domain. The C HAL enables this clock
-        // before accessing EPIC registers; do the same here so the driver is
-        // ready to use right after construction.
-        unsafe {
-            Peripherals::steal()
-                .pm
-                .clk_apb_m_set()
-                .write(|w| w.epic().enable());
-        }
+impl InterruptMask {
+    pub const NONE: Self = Self(0);
+    pub const ALL: Self = Self(u32::MAX);
 
-        Self {
-            dp: dp,
-            line_mask: 0u32,
-        }
+    pub const fn from_bits(bits: u32) -> Self {
+        Self(bits)
     }
 
-    /// Включает линию прерывания
-    ///
-    /// Если на линию уже было включено прерывание, но другого типа
-    /// (включаете "по фронту", а уже было включено "по уровеню"), то вернётся ошибка
-    ///
-    /// # Arguments
-    ///
-    /// - `line` (`InterruptLine`) - линия прерывания
-    /// - `trigger` (`Trigger`) - тип срабатывания прерывания (по фронту или по уровню)
-    ///
-    /// # Returns
-    ///
-    /// - `Result<(), Error>` - успех включения прерывания
-    ///
-    /// # Errors
-    ///
-    /// На линию уже было включено прерывание другого типа
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use crate::epic::EPIC;
-    ///
-    /// let dp = Peripherals::take().unwrap();
-    /// let mut epic = EPIC::new(dp.epic);
-    /// epic.listen(InterruptLine::Timer32_1); // Включим прерывание по линии таймера
-    /// ```
-    pub fn listen(&mut self, line: InterruptLine, trigger: Trigger) -> Result<(), Error> {
-        let line_mask = line.mask();
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
 
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub const fn contains(self, interrupt: Interrupt) -> bool {
+        self.0 & interrupt.mask().0 != 0
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Removes and returns the lowest-numbered pending interrupt.
+    pub fn next(&mut self) -> Option<Interrupt> {
+        if self.is_empty() {
+            return None;
+        }
+        let index = self.0.trailing_zeros();
+        self.0 &= !(1 << index);
+        Some(Interrupt::from_index(index))
+    }
+}
+
+impl From<Interrupt> for InterruptMask {
+    fn from(interrupt: Interrupt) -> Self {
+        interrupt.mask()
+    }
+}
+
+impl BitOr for InterruptMask {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl BitOrAssign for InterruptMask {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl BitAnd for InterruptMask {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self(self.0 & rhs.0)
+    }
+}
+
+impl BitAndAssign for InterruptMask {
+    fn bitand_assign(&mut self, rhs: Self) {
+        self.0 &= rhs.0;
+    }
+}
+
+impl Not for InterruptMask {
+    type Output = Self;
+    fn not(self) -> Self::Output {
+        Self(!self.0)
+    }
+}
+
+/// Owner of the EPIC PAC peripheral.
+pub struct Epic {
+    peripheral: EpicPeripheral,
+}
+
+impl Epic {
+    /// Creates the driver without changing existing masks.
+    ///
+    /// The caller must enable the EPIC clock in the APB_M clock domain first.
+    pub const fn new(peripheral: EpicPeripheral) -> Self {
+        Self { peripheral }
+    }
+
+    /// Disables all lines and clears all latched pending events.
+    pub fn reset(&mut self) {
+        self.disable_mask(InterruptMask::ALL);
+        self.clear_pending_mask(InterruptMask::ALL);
+    }
+
+    pub fn enable(&mut self, interrupt: Interrupt, trigger: Trigger) {
+        self.enable_mask(interrupt.mask(), trigger);
+    }
+
+    /// Enables a group of lines and selects edge or level mode for all of them.
+    /// Any opposite-mode configuration for these lines is removed first.
+    pub fn enable_mask(&mut self, mask: InterruptMask, trigger: Trigger) {
+        let bits = mask.bits();
         match trigger {
             Trigger::Edge => {
-                if self.line_mask & line_mask != 0 {
-                    return Err(Error::LineLevelSet);
-                }
-
-                self.dp
+                self.peripheral
+                    .mask_level_clear()
+                    .write(|w| unsafe { w.bits(bits) });
+                self.peripheral
                     .mask_edge_set()
-                    .write(|w| unsafe { w.bits(line_mask) });
+                    .write(|w| unsafe { w.bits(bits) });
             }
             Trigger::Level => {
-                if self.dp.mask_edge_set().read().bits() & line_mask != 0 {
-                    return Err(Error::LineEdgeSet);
-                }
-
-                self.line_mask |= line_mask;
-                self.dp
+                self.peripheral
+                    .mask_edge_clear()
+                    .write(|w| unsafe { w.bits(bits) });
+                self.peripheral
                     .mask_level_set()
-                    .write(|w| unsafe { w.bits(self.line_mask) });
+                    .write(|w| unsafe { w.bits(bits) });
             }
         }
-        Ok(())
     }
 
-    /// Выключает прерывания по конкретной линии
-    /// Отключаются все прерввания, по фронту и по уровню.
-    ///
-    /// # Arguments
-    ///
-    /// - `line` (`InterruptLine`) - какую линию прервываний отключить, если `None`, то отключить все линии
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use crate::epic::EPIC;
-    /// use mik32_pac::Peripherals;
-    ///
-    /// let dp = Peripherals::take().unwrap();
-    /// let mut epic = EPIC::new(dp.epic);
-    /// epic.unlisten(InterruptLine::Timer32_1); // Выключим прерывание по линии таймера
-    /// ```
-    pub fn unlisten(&mut self, line: Option<InterruptLine>) {
-        if let Some(line) = line {
-            let line_mask = line.mask();
-
-            // Выключаем "по фронту"
-            self.dp
-                .mask_edge_clear()
-                .write(|w| unsafe { w.bits(line_mask) });
-
-            // Выключаем "по уровню"
-            self.line_mask &= !line_mask;
-            self.dp
-                .mask_level_clear()
-                .write(|w| unsafe { w.bits(line_mask) });
-        } else {
-            // Выключаем все "по фронту"
-            self.dp
-                .mask_edge_clear()
-                .write(|w| unsafe { w.bits(u32::MAX) });
-
-            // Выключаем все "по уровню"
-            self.line_mask = 0u32;
-            self.dp
-                .mask_level_clear()
-                .write(|w| unsafe { w.bits(u32::MAX) });
-        }
+    pub fn disable(&mut self, interrupt: Interrupt) {
+        self.disable_mask(interrupt.mask());
     }
 
-    /// Произошло ли событие?
-    ///
-    /// # Arguments
-    /// - `event` (`InterruptEvent`) - проверяемое событие
-    ///
-    /// # Returns
-    ///
-    /// - `bool` - случилось ли событие
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use crate::epic::EPIC;
-    /// use mik32_pac::Peripherals;
-    ///
-    /// let dp = Peripherals::take().unwrap();
-    /// let mut epic = EPIC::new(dp.epic);
-    /// epic.listen(InterruptLine::Timer32_1); // Включим прерывание по линии таймера
-    /// let is_timer_event_happend: bool = epic.event(InterruptLine::Timer32_1);
-    /// ```
-    pub fn event(&self, line: InterruptLine) -> bool {
-        self.raw_pending(line)
+    /// Disables both edge and level handling for selected lines.
+    pub fn disable_mask(&mut self, mask: InterruptMask) {
+        let bits = mask.bits();
+        self.peripheral
+            .mask_edge_clear()
+            .write(|w| unsafe { w.bits(bits) });
+        self.peripheral
+            .mask_level_clear()
+            .write(|w| unsafe { w.bits(bits) });
     }
 
-    /// Returns true when a configured, unmasked interrupt is pending.
+    /// Returns enabled interrupts that currently require handling (`STATUS`).
+    pub fn pending(&self) -> InterruptMask {
+        InterruptMask::from_bits(self.peripheral.status().read().bits())
+    }
+
+    pub fn is_pending(&self, interrupt: Interrupt) -> bool {
+        self.pending().contains(interrupt)
+    }
+
+    /// Returns current input-line states without applying masks (`RAW_STATUS`).
+    pub fn asserted(&self) -> InterruptMask {
+        InterruptMask::from_bits(self.peripheral.raw_status().read().bits())
+    }
+
+    pub fn is_asserted(&self, interrupt: Interrupt) -> bool {
+        self.asserted().contains(interrupt)
+    }
+
+    pub fn clear_pending(&mut self, interrupt: Interrupt) {
+        self.clear_pending_mask(interrupt.mask());
+    }
+
+    /// Clears selected latched EPIC events.
     ///
-    /// Reads EPIC `STATUS`, which is the right register for dispatching from a
-    /// trap handler because it takes EPIC masks into account.
-    pub fn pending(&self, line: InterruptLine) -> bool {
-        self.pending_mask() & line.mask() != 0
+    /// For a level interrupt, clear the cause in the source peripheral first;
+    /// otherwise the line becomes pending again immediately.
+    pub fn clear_pending_mask(&mut self, mask: InterruptMask) {
+        self.peripheral
+            .clear()
+            .write(|w| unsafe { w.bits(mask.bits()) });
     }
 
-    /// Returns the full EPIC `STATUS` register.
-    pub fn pending_mask(&self) -> u32 {
-        self.dp.status().read().bits()
-    }
-
-    /// Returns true when the interrupt line is asserted regardless of masks.
-    ///
-    /// Reads EPIC `RAW_STATUS`.
-    pub fn raw_pending(&self, line: InterruptLine) -> bool {
-        self.raw_pending_mask() & line.mask() != 0
-    }
-
-    /// Returns the full EPIC `RAW_STATUS` register.
-    pub fn raw_pending_mask(&self) -> u32 {
-        self.dp.raw_status().read().bits()
-    }
-
-    /// Clears the pending flag for one interrupt line.
-    pub fn clear_line(&mut self, line: InterruptLine) {
-        self.clear_mask(line.mask());
-    }
-
-    /// Clears pending flags selected by `mask`.
-    pub fn clear_mask(&mut self, mask: u32) {
-        self.dp.clear().write(|w| unsafe { w.bits(mask) });
-    }
-
-    /// Clears pending flags for all interrupt lines.
-    pub fn clear_all(&mut self) {
-        self.clear_mask(u32::MAX);
-    }
-
-    ///  Очищает флаги всех прерываний
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use crate::epic::EPIC;
-    /// use mik32_pac::Peripherals;
-    /// let dp = Peripherals::take().unwrap();
-    /// let mut epic = EPIC::new(dp.epic);
-    /// epic.unlisten(InterruptLine::Timer32_1); // Выключим прерывание по линии таймера
-    /// ```
-    pub fn clear(&mut self) {
-        self.clear_all();
+    pub fn release(self) -> EpicPeripheral {
+        self.peripheral
     }
 }

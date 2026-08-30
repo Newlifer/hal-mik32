@@ -238,6 +238,98 @@ impl Default for RCC {
 }
 
 impl RCC {
+    /// Включает тактирование контроллера прерываний EPIC в домене APB_M.
+    ///
+    /// Вызовите этот метод перед созданием [`crate::epic::Epic`].
+    pub fn enable_epic() {
+        let pm = unsafe { Pm::steal() };
+        pm.clk_apb_m_set().write(|w| w.epic().enable());
+    }
+
+    /// Включает тактирование `Timer32_0` в домене APB_M.
+    pub fn enable_timer32_0() {
+        let pm = unsafe { Pm::steal() };
+        pm.clk_apb_m_set().write(|w| w.timer32_0().enable());
+    }
+
+    /// Включает тактирование `Timer32_1` в домене APB_P.
+    pub fn enable_timer32_1() {
+        let pm = unsafe { Pm::steal() };
+        pm.clk_apb_p_set().write(|w| w.timer32_1().enable());
+    }
+
+    /// Включает тактирование `Timer32_2` в домене APB_P.
+    pub fn enable_timer32_2() {
+        let pm = unsafe { Pm::steal() };
+        pm.clk_apb_p_set().write(|w| w.timer32_2().enable());
+    }
+
+    /// Настраивает внешний mux источника тактирования `Timer32_0`.
+    pub(crate) fn configure_timer32_0_clock(source: crate::timer32_0::ClockSource) {
+        use crate::timer32_0::ClockSource;
+
+        let pm = unsafe { Pm::steal() };
+        match source {
+            ClockSource::SystemClock => {
+                pm.timer_cfg().modify(|_, w| w.mux_tim32_0_tim1().sys_clk());
+            }
+            ClockSource::Hclk | ClockSource::Prescaler => {
+                pm.timer_cfg().modify(|_, w| w.mux_tim32_0_tim1().hclk());
+            }
+            ClockSource::Osc32k => {
+                pm.timer_cfg().modify(|_, w| w.mux_tim32_0_tim2().osc32k());
+            }
+            ClockSource::Lsi32k => {
+                pm.timer_cfg().modify(|_, w| w.mux_tim32_0_tim2().lsi32k());
+            }
+            ClockSource::ExternalPin => {}
+        }
+    }
+
+    /// Настраивает внешний mux источника тактирования `Timer32_1`.
+    pub(crate) fn configure_timer32_1_clock(source: crate::timer32_1::ClockSource) {
+        use crate::timer32_1::ClockSource;
+
+        let pm = unsafe { Pm::steal() };
+        match source {
+            ClockSource::SystemClock => {
+                pm.timer_cfg().modify(|_, w| w.mux_tim32_1_tim1().sys_clk());
+            }
+            ClockSource::Hclk | ClockSource::Prescaler => {
+                pm.timer_cfg().modify(|_, w| w.mux_tim32_1_tim1().hclk());
+            }
+            ClockSource::Osc32k => {
+                pm.timer_cfg().modify(|_, w| w.mux_tim32_1_tim2().osc32k());
+            }
+            ClockSource::Lsi32k => {
+                pm.timer_cfg().modify(|_, w| w.mux_tim32_1_tim2().lsi32k());
+            }
+            ClockSource::ExternalPin => {}
+        }
+    }
+
+    /// Настраивает внешний mux источника тактирования `Timer32_2`.
+    pub(crate) fn configure_timer32_2_clock(source: crate::timer32_2::ClockSource) {
+        use crate::timer32_2::ClockSource;
+
+        let pm = unsafe { Pm::steal() };
+        match source {
+            ClockSource::SystemClock => {
+                pm.timer_cfg().modify(|_, w| w.mux_tim32_2_tim1().sys_clk());
+            }
+            ClockSource::Hclk | ClockSource::Prescaler => {
+                pm.timer_cfg().modify(|_, w| w.mux_tim32_2_tim1().hclk());
+            }
+            ClockSource::Osc32k => {
+                pm.timer_cfg().modify(|_, w| w.mux_tim32_2_tim2().osc32k());
+            }
+            ClockSource::Lsi32k => {
+                pm.timer_cfg().modify(|_, w| w.mux_tim32_2_tim2().lsi32k());
+            }
+            ClockSource::ExternalPin => {}
+        }
+    }
+
     /// Применяет RCC-конфигурацию и возвращает рассчитанные частоты шин.
     ///
     /// Метод валидирует выбранные источники до записи регистров, чтобы не

@@ -34,8 +34,8 @@ These steps must be implemented in this order because they are needed for the mi
 After RCC, GPIO, and USART are in place, the order is not important. Each completed item increments the crate version by `0.1`.
 
 - [ ] EPIC
-- [ ] Timer32 0
-- [ ] Timer32 1+2
+- [x] Timer32 0
+- [x] Timer32 1+2
 - [x] Timer16 (both)
 - [ ] DMA
 - [ ] SPI
