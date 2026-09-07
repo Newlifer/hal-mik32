@@ -49,7 +49,7 @@ After RCC, GPIO, and USART are in place, the order is not important. Each comple
 - [ ] BrownOut
 - [x] TSENS
 - [ ] ADC
-- [ ] DAC
+- [+] DAC (partial)
 - [ ] RTC
 
 ## Usage
