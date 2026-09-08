@@ -238,6 +238,12 @@ impl Default for RCC {
 }
 
 impl RCC {
+    /// Включает тактирование блока CRC32 в домене AHB.
+    pub fn enable_crc32() {
+        let pm = unsafe { Pm::steal() };
+        pm.clk_ahb_set().write(|w| w.crc32().enable());
+    }
+
     /// Включает тактирование контроллера прерываний EPIC в домене APB_M.
     ///
     /// Вызовите этот метод перед созданием [`crate::epic::Epic`].

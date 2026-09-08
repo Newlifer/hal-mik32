@@ -39,17 +39,18 @@ After RCC, GPIO, and USART are in place, the order is not important. Each comple
 - [x] Timer16 (both)
 - [ ] DMA
 - [ ] SPI
-- [x] SPIFI (sync, but not async)
+- [x] SPIFI (only sync)
 - [x] I2C
 - [ ] WDT
 - [ ] EEPROM
 - [ ] AVCC
 - [ ] VCC
 - [ ] Battery
-- [ ] BrownOut
+- [x] CRC
+- [ ] Crypto
 - [x] TSENS
 - [ ] ADC
-- [+] DAC (partial)
+- [x] DAC (partial)
 - [ ] RTC
 
 ## Usage
