@@ -50,7 +50,7 @@ After RCC, GPIO, and USART are in place, the order is not important. Each comple
 - [ ] Crypto
 - [x] TSENS
 - [ ] ADC
-- [x] DAC (partial)
+- [x] DAC
 - [ ] RTC
 
 ## Usage
