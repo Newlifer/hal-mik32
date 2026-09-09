@@ -489,7 +489,7 @@ impl Instance for Usart1 {
     const DMA_REQUEST: u32 = 1;
     #[inline(always)]
     fn ptr() -> *const RegisterBlock {
-        Usart1::ptr()
+        Usart1::ptr() as *const RegisterBlock
     }
 
     #[inline(always)]
