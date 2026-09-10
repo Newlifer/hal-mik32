@@ -7,6 +7,7 @@ pub mod brownout;
 pub mod clock;
 pub mod constants;
 pub mod crc;
+pub mod crypto;
 pub mod dac;
 pub mod dma;
 pub mod eeprom;

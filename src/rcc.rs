@@ -238,6 +238,12 @@ impl Default for RCC {
 }
 
 impl RCC {
+    /// Включает тактирование криптографического блока в домене AHB.
+    pub fn enable_crypto() {
+        let pm = unsafe { Pm::steal() };
+        pm.clk_ahb_set().write(|w| w.crypto().enable());
+    }
+
     /// Включает тактирование блока CRC32 в домене AHB.
     pub fn enable_crc32() {
         let pm = unsafe { Pm::steal() };

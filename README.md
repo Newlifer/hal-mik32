@@ -47,7 +47,7 @@ After RCC, GPIO, and USART are in place, the order is not important. Each comple
 - [ ] VCC
 - [ ] Battery
 - [x] CRC
-- [ ] Crypto
+- [x] Crypto
 - [x] TSENS
 - [ ] ADC
 - [x] DAC

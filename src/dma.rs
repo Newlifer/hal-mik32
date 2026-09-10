@@ -79,6 +79,13 @@ impl Dma {
         Self { peripheral }
     }
 
+    /// Enables the shared DMA completion and error interrupt outputs.
+    pub fn enable_interrupts(&mut self) {
+        self.peripheral
+            .config()
+            .write(|w| unsafe { w.bits((0x0f << 0) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7)) });
+    }
+
     pub fn split(self) -> Channels {
         let _ = self.peripheral;
         Channels {
