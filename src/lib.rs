@@ -16,6 +16,7 @@ pub mod gpio;
 pub mod i2c;
 pub mod rcc;
 pub mod rtc;
+pub mod scr1_timer;
 pub mod spi;
 pub mod spifi;
 pub mod timer16;

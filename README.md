@@ -38,7 +38,7 @@ After RCC, GPIO, and USART are in place, the order is not important. Each comple
 - [x] Timer32 1+2
 - [x] Timer16 (both)
 - [ ] DMA
-- [ ] SPI
+- [x] SPI
 - [x] SPIFI (only sync)
 - [x] I2C
 - [ ] WDT
@@ -52,6 +52,7 @@ After RCC, GPIO, and USART are in place, the order is not important. Each comple
 - [ ] ADC
 - [x] DAC
 - [ ] RTC
+- [x] SCR1 timer
 
 ## Usage
 
