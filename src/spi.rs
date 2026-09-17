@@ -8,6 +8,28 @@ const BAUD_DIVIDERS: [u32; 7] = [4, 8, 16, 32, 64, 128, 256];
 const DEFAULT_TIMEOUT: u32 = 100_000;
 const DEFAULT_THRESHOLD: u32 = 4;
 
+/// Hardware slave-select line used by the SPI controller.
+///
+/// The pad may be configured as GPIO when chip select is driven by SpiDevice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChipSelect {
+    Cs0,
+    Cs1,
+    Cs2,
+    Cs3,
+}
+
+impl ChipSelect {
+    const fn mask(self) -> u8 {
+        match self {
+            Self::Cs0 => 0b1110,
+            Self::Cs1 => 0b1101,
+            Self::Cs2 => 0b1011,
+            Self::Cs3 => 0b0111,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Delays {
     pub init: u8,
@@ -29,6 +51,7 @@ impl Default for Delays {
 pub struct Config {
     pub frequency: crate::clock::Hertz,
     pub mode: embedded_hal::spi::Mode,
+    pub chip_select: ChipSelect,
     pub timeout: u32,
     pub threshold: u32,
     pub delays: Delays,
@@ -39,6 +62,7 @@ impl Default for Config {
         Self {
             frequency: crate::clock::Hertz::mhz(8),
             mode: embedded_hal::spi::MODE_0,
+            chip_select: ChipSelect::Cs0,
             timeout: DEFAULT_TIMEOUT,
             threshold: DEFAULT_THRESHOLD,
             delays: Delays::default(),
@@ -152,8 +176,8 @@ impl<SPI: Instance> Spi<SPI> {
             let w = w
                 .mode_sel()
                 .master()
-                .ref_clk()
-                .apb_p_clk()
+                // MIK32V2 reference HAL leaves REF_CLK (bit 8) clear.
+                .ref_clk().clear_bit()
                 .baud_rate_div()
                 .variant(match divider {
                     4 => mik32_pac::spi_0::config::BaudRateDiv::Div4,
@@ -182,7 +206,8 @@ impl<SPI: Instance> Spi<SPI> {
                     embedded_hal::spi::Phase::CaptureOnSecondTransition,
                 ) => w.clk_pol()._1().clk_ph()._1(),
             };
-            w.manual_cs().automatic().cs().not_selected()
+            // PAC CS variants do not match the active-low masks on MIK32V2.
+            unsafe { w.manual_cs().automatic().cs().bits(config.chip_select.mask()) }
         });
         registers.delay().write(|w| unsafe {
             w.d_int()
