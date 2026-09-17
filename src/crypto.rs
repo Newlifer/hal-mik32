@@ -344,62 +344,6 @@ impl<A: Algorithm> Ecb<'_, A> {
         rx.stop();
         Err(DmaError::Timeout.into())
     }
-
-    /// Encrypts words through DMA, sleeping until DMA interrupts signal that
-    /// both channels have completed. The interrupt handler must clear the DMA
-    /// and EPIC interrupt sources before returning.
-    pub fn encrypt_words_dma_interrupt<TX, RX, WAIT>(
-        &mut self,
-        tx: &mut DmaChannel<TX>,
-        rx: &mut DmaChannel<RX>,
-        input: &[u32],
-        output: &mut [u32],
-        mut wait: WAIT,
-    ) -> Result<(), DmaTransferError>
-    where
-        TX: DmaChannelId,
-        RX: DmaChannelId,
-        WAIT: FnMut(),
-    {
-        let words_per_block = A::BLOCK_BYTES / size_of::<u32>();
-        if input.is_empty() || input.len() != output.len() || input.len() % words_per_block != 0 {
-            return Err(DmaTransferError::InvalidLength);
-        }
-
-        self.cipher.crypto.configure(config::ModeSel::Ecb, false);
-        let length = input
-            .len()
-            .checked_mul(size_of::<u32>())
-            .ok_or(DmaTransferError::Dma(DmaError::TransferTooLong))?;
-        let block = CryptoPeripheral::PTR.cast_mut().cast::<u8>();
-        const LOCAL_IRQ: u32 = 1 << 27;
-
-        tx.start(
-            input.as_ptr().cast(),
-            block,
-            length,
-            crypto_dma_tx_config() | LOCAL_IRQ,
-        )?;
-        if let Err(error) = rx.start(
-            block.cast_const(),
-            output.as_mut_ptr().cast(),
-            length,
-            crypto_dma_rx_config() | LOCAL_IRQ,
-        ) {
-            tx.stop();
-            return Err(error.into());
-        }
-
-        loop {
-            wait();
-            let tx_done = tx.poll()?;
-            let rx_done = rx.poll()?;
-            if tx_done && rx_done {
-                self.cipher.crypto.wait_ready();
-                return Ok(());
-            }
-        }
-    }
 }
 
 /// Cipher block chaining encryption mode.
